@@ -1,0 +1,247 @@
+"""Local symbol resolver for the Indra code knowledge graph.
+
+Walks tree-sitter ASTs to resolve method call edges within a single file.
+This is a best-effort name-based resolver — it does not perform full type
+resolution.  The caller (orchestrator) invokes this after extraction.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+
+@dataclass
+class CallEdge:
+    caller_id: str   # Method.id of the calling method
+    callee_id: str   # Method.id (CALLS) or new uuid (UNRESOLVED_CALL)
+    edge_type: str   # "CALLS" or "UNRESOLVED_CALL"
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def build_fqn_index(methods: list[dict]) -> dict[str, str]:
+    """Return ``{fqn: method_id}`` for all methods in *methods*.
+
+    Args:
+        methods: List of method dicts as produced by JavaExtractor /
+            KotlinExtractor (each must have ``"fqn"`` and ``"id"`` keys).
+
+    Returns:
+        A mapping from fully-qualified method name to its UUID string id.
+    """
+    return {m["fqn"]: m["id"] for m in methods}
+
+
+def resolve_calls(
+    tree,
+    source_bytes: bytes,
+    methods: list[dict],
+    fqn_index: dict[str, str],
+    file_id: str,
+    repo_id: str,
+) -> list[CallEdge]:
+    """Walk all method bodies in *tree* and emit call edges.
+
+    For every ``method_invocation`` (Java) or ``call_expression`` (Kotlin)
+    found inside a method body:
+
+    * If the callee simple name matches the suffix ``.{name}`` of any entry
+      in *fqn_index* → emit ``CallEdge(..., edge_type="CALLS")``.
+    * Otherwise → emit ``CallEdge(..., callee_id=new_uuid,
+      edge_type="UNRESOLVED_CALL")``.
+
+    Args:
+        tree:         tree-sitter ``Tree`` object for the source file.
+        source_bytes: Raw UTF-8 bytes of the source file.
+        methods:      Method dicts for methods declared in this file.
+        fqn_index:    ``{fqn: method_id}`` index (may span multiple files /
+                      repos — whatever the orchestrator provides).
+        file_id:      ID of the current file (unused in edge output but
+                      available for future filtering).
+        repo_id:      ID of the current repo (same note).
+
+    Returns:
+        List of :class:`CallEdge` instances.
+    """
+    edges: list[CallEdge] = []
+
+    # Build a fast lookup: (method_name, approximate_line) → method_id
+    # We also keep a name→list mapping for quick name matching.
+    _name_to_methods: dict[str, list[dict]] = {}
+    for m in methods:
+        _name_to_methods.setdefault(m["name"], []).append(m)
+
+    # Build suffix index: simple_name → list[method_id] from fqn_index
+    # e.g.  "com.example.Foo.bar" → simple name "bar"
+    _suffix_index: dict[str, list[str]] = {}
+    for fqn, mid in fqn_index.items():
+        simple = fqn.rsplit(".", 1)[-1]
+        _suffix_index.setdefault(simple, []).append(mid)
+
+    root = tree.root_node
+
+    # Walk the tree looking for method / function declarations
+    for node in _walk_all(root):
+        if node.type in ("method_declaration", "function_declaration"):
+            _process_method_node(
+                node,
+                source_bytes,
+                methods,
+                _suffix_index,
+                edges,
+            )
+
+    return edges
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _text(node, source_bytes: bytes) -> str:
+    return source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
+
+
+def _walk_all(node):
+    """Yield *node* and all its descendants depth-first."""
+    yield node
+    for child in node.children:
+        yield from _walk_all(child)
+
+
+def _find_enclosing_method(
+    method_node,
+    source_bytes: bytes,
+    methods: list[dict],
+) -> str | None:
+    """Return the method_id from *methods* that corresponds to *method_node*.
+
+    Matching is done by method name + line number (tree-sitter line is
+    0-based; stored line_start is 1-based).
+    """
+    # Get the name of the declared method
+    name_node = method_node.child_by_field_name("name")
+    if name_node is None:
+        # Fallback: first identifier child
+        for c in method_node.children:
+            if c.type == "identifier":
+                name_node = c
+                break
+    if name_node is None:
+        return None
+
+    method_name = _text(name_node, source_bytes)
+    # tree-sitter start_point is (row, col), row is 0-based
+    line_start = method_node.start_point[0] + 1  # convert to 1-based
+
+    # Find the best match: same name, closest line_start
+    best: dict | None = None
+    best_delta = float("inf")
+    for m in methods:
+        if m["name"] == method_name:
+            delta = abs(m["line_start"] - line_start)
+            if delta < best_delta:
+                best_delta = delta
+                best = m
+    return best["id"] if best is not None else None
+
+
+def _process_method_node(
+    method_node,
+    source_bytes: bytes,
+    methods: list[dict],
+    suffix_index: dict[str, list[str]],
+    edges: list[CallEdge],
+) -> None:
+    """Emit CallEdge objects for all call sites inside *method_node*."""
+    caller_id = _find_enclosing_method(method_node, source_bytes, methods)
+    if caller_id is None:
+        return
+
+    # Find the body block
+    body_node = method_node.child_by_field_name("body")
+    if body_node is None:
+        # Fallback: look for a block or function_body child
+        for c in method_node.children:
+            if c.type in ("block", "function_body"):
+                body_node = c
+                break
+    if body_node is None:
+        return
+
+    # Collect all invocation nodes inside the body
+    for node in _walk_all(body_node):
+        if node.type in ("method_invocation", "call_expression"):
+            _process_invocation(node, source_bytes, caller_id, suffix_index, edges)
+
+
+def _get_invocation_name(inv_node, source_bytes: bytes) -> str | None:
+    """Extract the simple method name from an invocation node.
+
+    Handles both:
+      * Java ``method_invocation``: children contain identifier nodes and an
+        ``argument_list``; the identifier immediately before ``argument_list``
+        is the method name.
+      * Kotlin ``call_expression``: the first child is a navigation_expression
+        or simple identifier; we take the last identifier before the
+        ``value_arguments`` node.
+    """
+    children = inv_node.children
+
+    # --- Java-style: look for identifier just before argument_list ---
+    for i, c in enumerate(children):
+        if c.type == "argument_list":
+            for j in range(i - 1, -1, -1):
+                if children[j].type == "identifier":
+                    return _text(children[j], source_bytes)
+            return None
+
+    # --- Kotlin-style: look for identifier just before value_arguments ---
+    for i, c in enumerate(children):
+        if c.type == "value_arguments":
+            for j in range(i - 1, -1, -1):
+                if children[j].type == "identifier":
+                    return _text(children[j], source_bytes)
+                # navigation_expression: last identifier inside it
+                if children[j].type in (
+                    "navigation_expression",
+                    "simple_identifier",
+                ):
+                    # Walk into it to find last identifier
+                    for sub in reversed(list(_walk_all(children[j]))):
+                        if sub.type in ("identifier", "simple_identifier"):
+                            return _text(sub, source_bytes)
+            return None
+
+    # If the node itself is a simple call like `foo()` — first identifier child
+    for c in children:
+        if c.type == "identifier":
+            return _text(c, source_bytes)
+
+    return None
+
+
+def _process_invocation(
+    inv_node,
+    source_bytes: bytes,
+    caller_id: str,
+    suffix_index: dict[str, list[str]],
+    edges: list[CallEdge],
+) -> None:
+    """Emit one CallEdge for this invocation node."""
+    name = _get_invocation_name(inv_node, source_bytes)
+    if not name:
+        return
+
+    matches = suffix_index.get(name, [])
+    if matches:
+        # Best-effort: pick the first match
+        callee_id = matches[0]
+        edge_type = "CALLS"
+    else:
+        callee_id = str(uuid.uuid4())
+        edge_type = "UNRESOLVED_CALL"
+
+    edges.append(CallEdge(caller_id=caller_id, callee_id=callee_id, edge_type=edge_type))

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "WebFetch(*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(rm -rf /home*)",
+      "Bash(rm -rf /mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bank-bff*)",
+      "Bash(rm -rf /mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bitcoin-internal-api*)",
+      "Bash(rm -rf /mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-interest-internal-api*)",
+      "Bash(rm -rf /mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-rstock-core-api*)",
+      "Bash(rm -rf /mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-invest-internal-api*)",
+      "Bash(rm -rf /mnt/c/Users/srinivasa.sundaresan/Downloads*)",
+      "Bash(dd *)",
+      "Bash(mkfs*)",
+      "Bash(fdisk*)",
+      "Bash(format *)"
+    ]
+  }
+}

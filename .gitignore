@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+*.db-lock
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.gitnexus/
+__pycache__/
