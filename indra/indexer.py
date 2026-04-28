@@ -142,6 +142,7 @@ def _parse_file(args: tuple) -> ParseResult:
     result.methods = extract_result.methods
     result.endpoints = extract_result.endpoints
     result.rest_calls = extract_result.rest_calls
+    result.impl_map = extract_result.impl_map
 
     return result
 
@@ -308,6 +309,14 @@ def index_repo(
                 parse_results[pr.file_id] = pr
 
     # -----------------------------------------------------------------------
+    # Post Phase-1 — merge all per-file impl_maps into a global impl_index
+    # -----------------------------------------------------------------------
+    # last one wins — acceptable for P3-1.1; P3-1.2 uses this index to redirect UNRESOLVED edges
+    impl_index: dict[str, str] = {}
+    for pr in parse_results.values():
+        impl_index.update(pr.impl_map)
+
+    # -----------------------------------------------------------------------
     # Phase 2 — serial DB writes (main process only)
     # -----------------------------------------------------------------------
 
@@ -400,6 +409,7 @@ def index_repo(
             fqn_index,
             file_id,
             repo_id,
+            impl_index=impl_index,   # NEW — redirect UNRESOLVED calls to impl classes
         )
 
         seen_edges: set[tuple[str, str]] = set()

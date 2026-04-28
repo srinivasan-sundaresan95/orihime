@@ -31,6 +31,7 @@ from indra.mcp_server import (
     find_repo_dependencies,
     get_file_location,
     list_endpoints,
+    list_repos,
     list_unresolved_calls,
     search_symbol,
 )
@@ -250,7 +251,7 @@ class TestWithDB:
     def test_find_callers_result_has_expected_keys(self, with_db) -> None:
         results = find_callers("com.example.FooService.doWork")
         assert len(results) >= 1
-        assert set(results[0].keys()) >= {"fqn", "file_id", "line_start"}
+        assert set(results[0].keys()) >= {"fqn", "file_path", "line_start"}
 
     def test_find_callers_nonexistent_returns_empty(self, with_db) -> None:
         assert find_callers("no.such.Method") == []
@@ -265,7 +266,7 @@ class TestWithDB:
     def test_find_callees_result_has_expected_keys(self, with_db) -> None:
         results = find_callees("com.example.FooService.callFoo")
         assert len(results) >= 1
-        assert set(results[0].keys()) >= {"fqn", "file_id", "line_start"}
+        assert set(results[0].keys()) >= {"fqn", "file_path", "line_start"}
 
     def test_find_callees_nonexistent_returns_empty(self, with_db) -> None:
         assert find_callees("no.such.Method") == []
@@ -336,10 +337,10 @@ class TestWithDB:
     def test_get_file_location_missing_returns_none(self, with_db) -> None:
         assert get_file_location("no.such.FQN") is None
 
-    def test_get_file_location_result_has_file_id(self, with_db) -> None:
+    def test_get_file_location_result_has_file_path(self, with_db) -> None:
         result = get_file_location("com.example.FooService.callFoo")
         assert result is not None
-        assert "file_id" in result
+        assert "file_path" in result
 
     # --- blast_radius -------------------------------------------------------
 
@@ -356,7 +357,7 @@ class TestWithDB:
     def test_blast_radius_result_keys(self, with_db) -> None:
         results = blast_radius("com.example.FooService.doWork", max_depth=2)
         assert len(results) >= 1
-        assert set(results[0].keys()) >= {"fqn", "depth"}
+        assert set(results[0].keys()) >= {"fqn", "depth", "file_path"}
 
     def test_blast_radius_no_callers_returns_empty(self, with_db) -> None:
         # callFoo has no callers in the test data
@@ -376,7 +377,7 @@ class TestWithDB:
     def test_find_endpoint_callers_handler_keys(self, with_db) -> None:
         results = find_endpoint_callers("GET", "/api/foo")
         handler = next(r for r in results if r["role"] == "handler")
-        assert set(handler.keys()) >= {"role", "fqn", "file_id", "line_start"}
+        assert set(handler.keys()) >= {"role", "fqn", "file_path", "line_start"}
 
     def test_find_endpoint_callers_case_insensitive_verb(self, with_db) -> None:
         # http_method is uppercased inside the tool
@@ -406,4 +407,111 @@ class TestWithDB:
 
     def test_list_unresolved_calls_filtered_no_data_returns_empty(self, with_db) -> None:
         result = list_unresolved_calls("test-repo")
+        assert result == []
+
+    # --- file_path key assertions (P3-4.1) ----------------------------------
+
+    def test_find_callers_result_has_file_path(self, with_db) -> None:
+        results = find_callers("com.example.FooService.doWork")
+        assert len(results) >= 1
+        assert "file_path" in results[0]
+        assert "file_id" not in results[0]
+
+    def test_find_callers_file_path_value(self, with_db) -> None:
+        results = find_callers("com.example.FooService.doWork")
+        assert len(results) >= 1
+        assert results[0]["file_path"] == "src/Foo.java"
+
+    def test_search_symbol_class_result_has_file_path(self, with_db) -> None:
+        results = search_symbol("fooservice")
+        class_hits = [r for r in results if r["type"] == "class"]
+        assert len(class_hits) >= 1
+        assert "file_path" in class_hits[0]
+        assert "file_id" not in class_hits[0]
+
+    def test_search_symbol_method_result_has_file_path(self, with_db) -> None:
+        results = search_symbol("dowork")
+        method_hits = [r for r in results if r["type"] == "method"]
+        assert len(method_hits) >= 1
+        assert "file_path" in method_hits[0]
+        assert "file_id" not in method_hits[0]
+
+    def test_get_file_location_has_file_path_not_file_id(self, with_db) -> None:
+        result = get_file_location("com.example.FooService.doWork")
+        assert result is not None
+        assert "file_path" in result
+        assert "file_id" not in result
+
+    def test_get_file_location_file_path_value(self, with_db) -> None:
+        result = get_file_location("com.example.FooService.doWork")
+        assert result is not None
+        assert result["file_path"] == "src/Foo.java"
+
+    def test_get_file_location_class_has_file_path(self, with_db) -> None:
+        result = get_file_location("com.example.FooService")
+        assert result is not None
+        assert "file_path" in result
+        assert "file_id" not in result
+
+    def test_blast_radius_result_has_file_path(self, with_db) -> None:
+        results = blast_radius("com.example.FooService.doWork", max_depth=2)
+        assert len(results) >= 1
+        assert "file_path" in results[0]
+        assert "file_id" not in results[0]
+
+    # --- list_repos (P3-4.2) ------------------------------------------------
+
+    def test_list_repos_returns_indexed_repo(self, with_db) -> None:
+        results = list_repos()
+        names = [r["name"] for r in results]
+        assert "test-repo" in names
+
+    def test_list_repos_result_has_expected_keys(self, with_db) -> None:
+        results = list_repos()
+        assert len(results) >= 1
+        assert set(results[0].keys()) >= {"name", "root_path", "method_count", "endpoint_count"}
+
+    def test_list_repos_method_count_is_nonzero(self, with_db) -> None:
+        results = list_repos()
+        repo = next(r for r in results if r["name"] == "test-repo")
+        assert repo["method_count"] >= 2  # callFoo + doWork
+
+    def test_list_repos_endpoint_count_is_nonzero(self, with_db) -> None:
+        results = list_repos()
+        repo = next(r for r in results if r["name"] == "test-repo")
+        assert repo["endpoint_count"] >= 1  # GET /api/foo
+
+    def test_list_repos_root_path_is_correct(self, with_db) -> None:
+        results = list_repos()
+        repo = next(r for r in results if r["name"] == "test-repo")
+        assert repo["root_path"] == "/tmp/test-repo"
+
+
+# ---------------------------------------------------------------------------
+# "No DB" path — list_repos
+# ---------------------------------------------------------------------------
+
+class TestListReposNoConnection:
+    """list_repos must degrade gracefully when the DB is absent."""
+
+    def test_list_repos_no_connection_returns_empty(self) -> None:
+        with patch("indra.mcp_server._get_connection", return_value=None):
+            assert list_repos() == []
+
+
+# ---------------------------------------------------------------------------
+# "Empty DB" path — list_repos with no repos indexed
+# ---------------------------------------------------------------------------
+
+class TestListReposEmptyDB:
+    """list_repos returns empty list when no repos have been indexed."""
+
+    def test_list_repos_empty_db_returns_empty(self) -> None:
+        conn = _make_conn()
+        init_schema(conn)
+        # Do not populate any data
+        import indra.mcp_server as _mod
+        from unittest.mock import patch as _patch
+        with _patch.object(_mod, "_conn", conn), _patch.object(_mod, "_db", object()):
+            result = list_repos()
         assert result == []

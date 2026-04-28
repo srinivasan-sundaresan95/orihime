@@ -41,6 +41,7 @@ def resolve_calls(
     fqn_index: dict[str, str],
     file_id: str,
     repo_id: str,
+    impl_index: dict[str, str] | None = None,  # NEW — optional, defaults to None
 ) -> list[CallEdge]:
     """Walk all method bodies in *tree* and emit call edges.
 
@@ -49,6 +50,9 @@ def resolve_calls(
 
     * If the callee simple name matches the suffix ``.{name}`` of any entry
       in *fqn_index* → emit ``CallEdge(..., edge_type="CALLS")``.
+    * Otherwise, if *impl_index* is provided, attempt to resolve via the
+      implementation class: if any impl class in *impl_index* has a method
+      ``{impl_fqn}.{name}`` in *fqn_index*, emit ``CALLS`` to that method.
     * Otherwise → emit ``CallEdge(..., callee_id=new_uuid,
       edge_type="UNRESOLVED_CALL")``.
 
@@ -61,6 +65,10 @@ def resolve_calls(
         file_id:      ID of the current file (unused in edge output but
                       available for future filtering).
         repo_id:      ID of the current repo (same note).
+        impl_index:   Optional ``{interface_fqn: impl_class_fqn}`` mapping
+                      produced by P3-1.1.  When provided, UNRESOLVED calls
+                      are redirected to impl-class methods when a unique
+                      match exists.
 
     Returns:
         List of :class:`CallEdge` instances.
@@ -80,6 +88,13 @@ def resolve_calls(
         simple = fqn.rsplit(".", 1)[-1]
         _suffix_index.setdefault(simple, []).append(mid)
 
+    # When impl_index is active, restrict suffix matches to local methods to
+    # prevent accidental wiring to unregistered impl classes.  Cross-file
+    # resolution goes through the impl_index gate or becomes UNRESOLVED.
+    _local_method_ids: set[str] = (
+        {m["id"] for m in methods} if impl_index is not None else set()
+    )
+
     root = tree.root_node
 
     # Walk the tree looking for method / function declarations
@@ -91,6 +106,9 @@ def resolve_calls(
                 methods,
                 _suffix_index,
                 edges,
+                fqn_index=fqn_index,
+                impl_index=impl_index,
+                local_method_ids=_local_method_ids,
             )
 
     return edges
@@ -154,6 +172,9 @@ def _process_method_node(
     methods: list[dict],
     suffix_index: dict[str, list[str]],
     edges: list[CallEdge],
+    fqn_index: dict[str, str] | None = None,
+    impl_index: dict[str, str] | None = None,
+    local_method_ids: set[str] | None = None,
 ) -> None:
     """Emit CallEdge objects for all call sites inside *method_node*."""
     caller_id = _find_enclosing_method(method_node, source_bytes, methods)
@@ -174,7 +195,16 @@ def _process_method_node(
     # Collect all invocation nodes inside the body
     for node in _walk_all(body_node):
         if node.type in ("method_invocation", "call_expression"):
-            _process_invocation(node, source_bytes, caller_id, suffix_index, edges)
+            _process_invocation(
+                node,
+                source_bytes,
+                caller_id,
+                suffix_index,
+                edges,
+                fqn_index=fqn_index,
+                impl_index=impl_index,
+                local_method_ids=local_method_ids,
+            )
 
 
 def _get_invocation_name(inv_node, source_bytes: bytes) -> str | None:
@@ -229,17 +259,41 @@ def _process_invocation(
     caller_id: str,
     suffix_index: dict[str, list[str]],
     edges: list[CallEdge],
+    fqn_index: dict[str, str] | None = None,
+    impl_index: dict[str, str] | None = None,
+    local_method_ids: set[str] | None = None,
 ) -> None:
     """Emit one CallEdge for this invocation node."""
     name = _get_invocation_name(inv_node, source_bytes)
     if not name:
         return
 
-    matches = suffix_index.get(name, [])
+    # Suffix matches are restricted to local methods when impl_index is active
+    # to prevent accidental wiring to unregistered impl classes; cross-file
+    # resolution goes exclusively through the impl_index gate.
+    raw_matches = suffix_index.get(name, [])
+    if impl_index is not None:
+        matches = [mid for mid in raw_matches if mid in local_method_ids]
+    else:
+        matches = raw_matches
+
     if matches:
-        # Best-effort: pick the first match
         callee_id = matches[0]
         edge_type = "CALLS"
+    elif impl_index is not None and fqn_index:
+        # impl_index already has last-one-wins deduplication from P3-1.1, so
+        # iteration order here is deterministic; stop at first hit.
+        callee_id = None
+        for _iface_fqn, impl_fqn in impl_index.items():
+            candidate = f"{impl_fqn}.{name}"
+            if candidate in fqn_index:
+                callee_id = fqn_index[candidate]
+                break
+        if callee_id is not None:
+            edge_type = "CALLS"
+        else:
+            callee_id = str(uuid.uuid4())
+            edge_type = "UNRESOLVED_CALL"
     else:
         callee_id = str(uuid.uuid4())
         edge_type = "UNRESOLVED_CALL"

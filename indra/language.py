@@ -22,6 +22,7 @@ class ExtractResult:
     methods: list[dict] = field(default_factory=list)
     endpoints: list[dict] = field(default_factory=list)
     rest_calls: list[dict] = field(default_factory=list)
+    impl_map: dict[str, str] = field(default_factory=dict)
 
 
 class LanguageExtractor(Protocol):

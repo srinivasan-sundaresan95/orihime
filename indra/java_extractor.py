@@ -174,6 +174,159 @@ def _extract_package(root, source_bytes: bytes) -> str:
     return ""
 
 
+def _get_string_fragment(node, source_bytes: bytes) -> str | None:
+    frag = _find_first_child_of_type(node, "string_fragment")
+    if frag:
+        return _text(frag, source_bytes)
+    return None
+
+
+def _resolve_field_access_in_index(node, source_bytes: bytes, constant_index: dict) -> str | None:
+    raw = _text(node, source_bytes)
+    return constant_index.get(raw)
+
+
+def _extract_url_from_binary_expression(
+    node, source_bytes: bytes, constant_index: "dict[str, str] | None" = None
+) -> "str | None":
+    """Extract a URL pattern from a string concatenation binary_expression node.
+
+    Returns the assembled url_pattern string, or None if the pattern cannot be
+    resolved to a useful string (partial wildcard fallbacks are omitted because
+    cross_resolver.py cannot match `*`-prefixed patterns against endpoint regexes).
+    """
+    try:
+        if node.type != "binary_expression":
+            return None
+        if constant_index is None:
+            constant_index = {}
+
+        named_children = [c for c in node.children if c.is_named]
+        if len(named_children) < 2:
+            return None
+
+        left = named_children[0]
+        right = named_children[1]
+
+        left_value: str | None = None
+        right_value: str | None = None
+
+        if left.type == "string_literal":
+            left_value = _get_string_fragment(left, source_bytes)
+        elif left.type == "field_access":
+            left_value = _resolve_field_access_in_index(left, source_bytes, constant_index)
+
+        if right.type == "string_literal":
+            right_value = _get_string_fragment(right, source_bytes)
+        elif right.type == "field_access":
+            right_value = _resolve_field_access_in_index(right, source_bytes, constant_index)
+
+        if left_value is not None and right_value is not None:
+            return left_value + right_value
+
+        return None
+    except Exception:
+        return None
+
+
+def _get_chain_root_identifier(inv_node, source_bytes: bytes) -> str:
+    """Walk a method_invocation chain to its root and return the root identifier name.
+
+    For UriComponentsBuilder.fromHttpUrl(...).path(...).build(), the root
+    method_invocation has identifier 'UriComponentsBuilder' as its first child.
+    Returns empty string if root cannot be determined.
+    """
+    try:
+        current = inv_node
+        while True:
+            first_child = current.children[0] if current.children else None
+            if first_child is None:
+                return ""
+            if first_child.type == "method_invocation":
+                current = first_child
+            elif first_child.type == "identifier":
+                return _text(first_child, source_bytes)
+            elif first_child.type == "field_access":
+                # Walk field_access to root identifier
+                fa = first_child
+                while fa.type == "field_access":
+                    inner = fa.children[0] if fa.children else None
+                    if inner is None:
+                        return ""
+                    fa = inner
+                if fa.type == "identifier":
+                    return _text(fa, source_bytes)
+                return ""
+            else:
+                return ""
+    except Exception:
+        return ""
+
+
+def _extract_url_from_uri_builder(call_node, source_bytes: bytes) -> "str | None":
+    """Extract URL pattern from UriComponentsBuilder.fromHttpUrl("base").path("/sub").build() chains.
+
+    Walk the method_invocation chain looking for:
+    - .fromHttpUrl("...")  or .fromUriString("...") → captures base URL
+    - .path("...")         → appends path segment
+    - .build() / .toUri() / .toUriString() → terminates the chain
+
+    Returns the assembled URL (base + path), or None if the pattern is not recognised.
+    """
+    try:
+        base_url: str | None = None
+        path_segments: list[str] = []
+
+        chain: list = []
+        current = call_node
+        while current is not None and current.type == "method_invocation":
+            chain.append(current)
+            first = current.children[0] if current.children else None
+            if first is not None and first.type == "method_invocation":
+                current = first
+            else:
+                break
+
+        # reversed(): chain[0] is outermost (.toUri()), chain[-1] is innermost (.fromHttpUrl(...))
+        for inv in reversed(chain):
+            method_name = ""
+            arg_list = None
+            children = inv.children
+            for i, c in enumerate(children):
+                if c.type == "argument_list":
+                    arg_list = c
+                    for j in range(i - 1, -1, -1):
+                        if children[j].type == "identifier":
+                            method_name = _text(children[j], source_bytes)
+                            break
+                    break
+
+            if method_name in ("fromHttpUrl", "fromUriString"):
+                if arg_list:
+                    for arg in arg_list.children:
+                        if arg.type == "string_literal":
+                            frag = _find_first_child_of_type(arg, "string_fragment")
+                            if frag:
+                                base_url = _text(frag, source_bytes)
+                            break
+            elif method_name == "path":
+                if arg_list:
+                    for arg in arg_list.children:
+                        if arg.type == "string_literal":
+                            frag = _find_first_child_of_type(arg, "string_fragment")
+                            if frag:
+                                path_segments.append(_text(frag, source_bytes))
+                            break
+
+        if base_url is None and not path_segments:
+            return None
+
+        result = (base_url or "") + "".join(path_segments)
+        return result if result else None
+    except Exception:
+        return None
+
+
 def _extract_static_final_strings(
     class_body_node, class_name: str, source_bytes: bytes
 ) -> dict[str, str]:
@@ -214,6 +367,67 @@ def _extract_static_final_strings(
     return result
 
 
+# Spring stereotype annotations that mark a class as a managed bean
+_SPRING_COMPONENT_ANNOTATIONS: frozenset[str] = frozenset(
+    {"Service", "Component", "Repository", "Controller", "RestController"}
+)
+
+
+def _extract_impl_map(root, source_bytes: bytes, package: str) -> dict[str, str]:
+    # Build import map: simple_name → fully-qualified name
+    import_map: dict[str, str] = {}
+    for child in root.children:
+        if child.type == "import_declaration":
+            # import_declaration text is like "import com.example.Foo ;"
+            # The scoped_identifier/identifier child holds the FQN
+            for cc in child.children:
+                if cc.type in ("scoped_identifier", "identifier"):
+                    fqn_text = _text(cc, source_bytes)
+                    # simple name is the last segment
+                    simple = fqn_text.rsplit(".", 1)[-1]
+                    import_map[simple] = fqn_text
+                    break
+
+    result: dict[str, str] = {}
+
+    for node in _walk_all(root):
+        if node.type != "class_declaration":
+            continue
+
+        # Check for Spring stereotype annotation
+        modifiers_node = _find_first_child_of_type(node, "modifiers")
+        if modifiers_node is None:
+            continue
+        ann_names = _collect_annotations(modifiers_node, source_bytes)
+        if not _SPRING_COMPONENT_ANNOTATIONS.intersection(ann_names):
+            continue
+
+        # Get class name and FQN
+        name_node = node.child_by_field_name("name") or _find_first_child_of_type(node, "identifier")
+        if name_node is None:
+            continue
+        class_name = _text(name_node, source_bytes)
+        class_fqn = f"{package}.{class_name}" if package else class_name
+
+        # tree-sitter-java names the implements clause field "interfaces", not "super_interfaces"
+        interfaces_node = node.child_by_field_name("interfaces")
+        if interfaces_node is None:
+            continue
+
+        # Collect type_identifier nodes within the interfaces clause
+        for iface_node in _walk_all(interfaces_node):
+            if iface_node.type == "type_identifier":
+                iface_simple = _text(iface_node, source_bytes)
+                # Resolve to FQN: prefer import, fall back to same package
+                if iface_simple in import_map:
+                    iface_fqn = import_map[iface_simple]
+                else:
+                    iface_fqn = f"{package}.{iface_simple}" if package else iface_simple
+                result[iface_fqn] = class_fqn
+
+    return result
+
+
 @dataclass
 class JavaExtractor:
     language: str = "java"
@@ -238,6 +452,9 @@ class JavaExtractor:
         self._extract_classes(
             root, source_bytes, file_id, repo_id, package, result, constant_index
         )
+
+        # Build interface → implementation mapping for Spring beans
+        result.impl_map = _extract_impl_map(root, source_bytes, package)
 
         return result
 
@@ -453,7 +670,10 @@ class JavaExtractor:
         if body_node is None:
             body_node = _find_first_child_of_type(method_node, "block")
         if body_node:
-            self._extract_rest_calls(body_node, source_bytes, method_id, repo_id, result)
+            self._extract_rest_calls(
+                body_node, source_bytes, method_id, repo_id, result,
+                constant_index=constant_index,
+            )
 
     def _extract_rest_calls(
         self,
@@ -462,11 +682,28 @@ class JavaExtractor:
         caller_method_id: str,
         repo_id: str,
         result: ExtractResult,
+        constant_index: "dict[str, str] | None" = None,
     ) -> None:
         for node in _walk_all(body_node):
             if node.type == "method_invocation":
+                if _get_chain_root_identifier(node, source_bytes) == "UriComponentsBuilder":
+                    parent = node.parent
+                    if parent is None or parent.type not in ("method_invocation", "argument_list"):
+                        url_pattern = _extract_url_from_uri_builder(node, source_bytes)
+                        result.rest_calls.append(
+                            {
+                                "id": str(uuid.uuid4()),
+                                "http_method": "GET",
+                                "url_pattern": url_pattern if url_pattern else "DYNAMIC",
+                                "caller_method_id": caller_method_id,
+                                "repo_id": repo_id,
+                            }
+                        )
+                    continue
+
                 self._process_method_invocation(
-                    node, source_bytes, caller_method_id, repo_id, result
+                    node, source_bytes, caller_method_id, repo_id, result,
+                    constant_index=constant_index,
                 )
 
     def _process_method_invocation(
@@ -476,6 +713,7 @@ class JavaExtractor:
         caller_method_id: str,
         repo_id: str,
         result: ExtractResult,
+        constant_index: "dict[str, str] | None" = None,
     ) -> None:
         """
         method_invocation structure variants:
@@ -548,7 +786,7 @@ class JavaExtractor:
                             http_method = m
                             break
 
-        # Extract URL pattern from first string argument
+        # Extract URL pattern from first string argument (or binary_expression)
         url_pattern = "DYNAMIC"
         if arg_list_node:
             for arg in arg_list_node.children:
@@ -556,6 +794,13 @@ class JavaExtractor:
                     frag = _find_first_child_of_type(arg, "string_fragment")
                     if frag:
                         url_pattern = _text(frag, source_bytes)
+                    break
+                elif arg.type == "binary_expression":
+                    extracted = _extract_url_from_binary_expression(
+                        arg, source_bytes, constant_index or {}
+                    )
+                    if extracted is not None:
+                        url_pattern = extracted
                     break
 
         result.rest_calls.append(

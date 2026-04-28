@@ -1,7 +1,7 @@
 """Indra MCP Server — code knowledge graph query tools.
 
-Exposes 10 tools over the MCP protocol (FastMCP):
-  9 query tools  + 1 index_repo_tool.
+Exposes 11 tools over the MCP protocol (FastMCP):
+  10 query tools + 1 index_repo_tool.
 
 Connection modes
 ----------------
@@ -124,7 +124,7 @@ def find_callers(method_fqn: str) -> list[dict]:
         method_fqn: Fully-qualified method name, e.g. ``com.example.Foo.bar``.
 
     Returns:
-        List of dicts with keys ``fqn``, ``file_id``, ``line_start``.
+        List of dicts with keys ``fqn``, ``file_path``, ``line_start``.
         Empty list if the method is not found or has no callers.
     """
     conn = _get_connection()
@@ -134,10 +134,11 @@ def find_callers(method_fqn: str) -> list[dict]:
         result = conn.execute(
             "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
             "WHERE callee.fqn = $fqn "
-            "RETURN caller.fqn AS fqn, caller.file_id AS file_id, caller.line_start AS line_start",
+            "MATCH (f:File) WHERE f.id = caller.file_id "
+            "RETURN caller.fqn AS fqn, f.path AS file_path, caller.line_start AS line_start",
             {"fqn": method_fqn},
         )
-        return _rows(result, ["fqn", "file_id", "line_start"])
+        return _rows(result, ["fqn", "file_path", "line_start"])
     except Exception as exc:
         log.error("find_callers(%r): %s", method_fqn, exc)
         return [{"error": str(exc)}]
@@ -155,7 +156,7 @@ def find_callees(method_fqn: str) -> list[dict]:
         method_fqn: Fully-qualified method name, e.g. ``com.example.Foo.bar``.
 
     Returns:
-        List of dicts with keys ``fqn``, ``file_id``, ``line_start``.
+        List of dicts with keys ``fqn``, ``file_path``, ``line_start``.
         Empty list if the method is not found or makes no calls.
     """
     conn = _get_connection()
@@ -165,10 +166,11 @@ def find_callees(method_fqn: str) -> list[dict]:
         result = conn.execute(
             "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
             "WHERE caller.fqn = $fqn "
-            "RETURN callee.fqn AS fqn, callee.file_id AS file_id, callee.line_start AS line_start",
+            "MATCH (f:File) WHERE f.id = callee.file_id "
+            "RETURN callee.fqn AS fqn, f.path AS file_path, callee.line_start AS line_start",
             {"fqn": method_fqn},
         )
-        return _rows(result, ["fqn", "file_id", "line_start"])
+        return _rows(result, ["fqn", "file_path", "line_start"])
     except Exception as exc:
         log.error("find_callees(%r): %s", method_fqn, exc)
         return [{"error": str(exc)}]
@@ -188,7 +190,7 @@ def find_endpoint_callers(http_method: str, path_pattern: str) -> list[dict]:
 
     Returns:
         List of dicts with keys ``role`` (``"handler"`` or ``"caller"``),
-        ``fqn``, ``file_id``, ``line_start``.
+        ``fqn``, ``file_path``, ``line_start``.
         Empty list if the endpoint is not found.
     """
     conn = _get_connection()
@@ -217,10 +219,11 @@ def find_endpoint_callers(http_method: str, path_pattern: str) -> list[dict]:
             # 2. Look up the handler Method node
             m_result = conn.execute(
                 "MATCH (m:Method) WHERE m.id = $mid "
-                "RETURN m.fqn AS fqn, m.file_id AS file_id, m.line_start AS line_start",
+                "MATCH (f:File) WHERE f.id = m.file_id "
+                "RETURN m.fqn AS fqn, f.path AS file_path, m.line_start AS line_start",
                 {"mid": handler_id},
             )
-            handler_rows = _rows(m_result, ["fqn", "file_id", "line_start"])
+            handler_rows = _rows(m_result, ["fqn", "file_path", "line_start"])
             for row in handler_rows:
                 results.append({"role": "handler", **row})
                 handler_fqn = row["fqn"]
@@ -229,10 +232,11 @@ def find_endpoint_callers(http_method: str, path_pattern: str) -> list[dict]:
                 callers_result = conn.execute(
                     "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
                     "WHERE callee.fqn = $fqn "
-                    "RETURN caller.fqn AS fqn, caller.file_id AS file_id, caller.line_start AS line_start",
+                    "MATCH (f:File) WHERE f.id = caller.file_id "
+                    "RETURN caller.fqn AS fqn, f.path AS file_path, caller.line_start AS line_start",
                     {"fqn": handler_fqn},
                 )
-                for caller_row in _rows(callers_result, ["fqn", "file_id", "line_start"]):
+                for caller_row in _rows(callers_result, ["fqn", "file_path", "line_start"]):
                     results.append({"role": "caller", **caller_row})
 
         return results
@@ -288,7 +292,7 @@ def blast_radius(method_fqn: str, max_depth: int = 3) -> list[dict]:
         max_depth:  Maximum number of hops to traverse (default 3, max 10).
 
     Returns:
-        List of dicts with keys ``fqn`` and ``depth``.
+        List of dicts with keys ``fqn``, ``file_path``, and ``depth``.
         Depth 1 = direct callers, depth 2 = their callers, etc.
         The changed method itself is not included.
     """
@@ -300,7 +304,7 @@ def blast_radius(method_fqn: str, max_depth: int = 3) -> list[dict]:
     max_depth = min(max_depth, 10)
 
     try:
-        visited: dict[str, int] = {}  # fqn -> depth
+        visited: dict[str, tuple[int, str]] = {}  # fqn -> (depth, file_path)
         queue: deque[tuple[str, int]] = deque()
         queue.append((method_fqn, 0))
 
@@ -312,18 +316,23 @@ def blast_radius(method_fqn: str, max_depth: int = 3) -> list[dict]:
             result = conn.execute(
                 "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
                 "WHERE callee.fqn = $fqn "
-                "RETURN caller.fqn AS fqn",
+                "MATCH (f:File) WHERE f.id = caller.file_id "
+                "RETURN caller.fqn AS fqn, f.path AS file_path",
                 {"fqn": current_fqn},
             )
             while result.has_next():
                 row = result.get_next()
                 caller_fqn: str = row[0]
+                caller_file_path: str = row[1]
                 next_depth = depth + 1
                 if caller_fqn not in visited:
-                    visited[caller_fqn] = next_depth
+                    visited[caller_fqn] = (next_depth, caller_file_path)
                     queue.append((caller_fqn, next_depth))
 
-        return [{"fqn": fqn, "depth": depth} for fqn, depth in sorted(visited.items(), key=lambda kv: kv[1])]
+        return [
+            {"fqn": fqn, "file_path": file_path, "depth": depth}
+            for fqn, (depth, file_path) in sorted(visited.items(), key=lambda kv: kv[1][0])
+        ]
     except Exception as exc:
         log.error("blast_radius(%r, %d): %s", method_fqn, max_depth, exc)
         return [{"error": str(exc)}]
@@ -342,7 +351,7 @@ def search_symbol(query: str) -> list[dict]:
 
     Returns:
         List of dicts with keys ``type`` (``"class"`` or ``"method"``),
-        ``fqn``, and ``file_id``.
+        ``fqn``, and ``file_path``.
         Results from both classes and methods are merged and returned together.
     """
     conn = _get_connection()
@@ -357,21 +366,23 @@ def search_symbol(query: str) -> list[dict]:
         class_result = conn.execute(
             "MATCH (c:Class) "
             "WHERE lower(c.name) CONTAINS $q "
-            "RETURN c.fqn AS fqn, c.file_id AS file_id "
+            "MATCH (f:File) WHERE f.id = c.file_id "
+            "RETURN c.fqn AS fqn, f.path AS file_path "
             "LIMIT 50",
             {"q": lower_query},
         )
-        for row in _rows(class_result, ["fqn", "file_id"]):
+        for row in _rows(class_result, ["fqn", "file_path"]):
             results.append({"type": "class", **row})
 
         method_result = conn.execute(
             "MATCH (m:Method) "
             "WHERE lower(m.name) CONTAINS $q "
-            "RETURN m.fqn AS fqn, m.file_id AS file_id "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn AS fqn, f.path AS file_path "
             "LIMIT 50",
             {"q": lower_query},
         )
-        for row in _rows(method_result, ["fqn", "file_id"]):
+        for row in _rows(method_result, ["fqn", "file_path"]):
             results.append({"type": "method", **row})
 
         return results
@@ -394,7 +405,7 @@ def get_file_location(fqn: str) -> Optional[dict]:
         fqn: Fully-qualified name of the method or class.
 
     Returns:
-        Dict with keys ``fqn``, ``file_id``, ``line_start``,
+        Dict with keys ``fqn``, ``file_path``, ``line_start``,
         or ``None`` if not found.
     """
     conn = _get_connection()
@@ -404,22 +415,24 @@ def get_file_location(fqn: str) -> Optional[dict]:
         # Try Method first
         method_result = conn.execute(
             "MATCH (m:Method) WHERE m.fqn = $fqn "
-            "RETURN m.fqn AS fqn, m.file_id AS file_id, m.line_start AS line_start",
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn AS fqn, f.path AS file_path, m.line_start AS line_start",
             {"fqn": fqn},
         )
         if method_result.has_next():
             row = method_result.get_next()
-            return {"fqn": row[0], "file_id": row[1], "line_start": row[2]}
+            return {"fqn": row[0], "file_path": row[1], "line_start": row[2]}
 
         # Fall back to Class (no line_start on Class, return 0)
         class_result = conn.execute(
             "MATCH (c:Class) WHERE c.fqn = $fqn "
-            "RETURN c.fqn AS fqn, c.file_id AS file_id",
+            "MATCH (f:File) WHERE f.id = c.file_id "
+            "RETURN c.fqn AS fqn, f.path AS file_path",
             {"fqn": fqn},
         )
         if class_result.has_next():
             row = class_result.get_next()
-            return {"fqn": row[0], "file_id": row[1], "line_start": 0}
+            return {"fqn": row[0], "file_path": row[1], "line_start": 0}
 
         return None
     except Exception as exc:
@@ -514,7 +527,37 @@ def list_unresolved_calls(repo_name: str = "") -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Tool 10: index_repo_tool
+# Tool 10: list_repos
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_repos() -> list[dict]:
+    """List all indexed repositories with their stats.
+
+    Returns:
+        List of dicts with keys: ``name``, ``root_path``, ``method_count``,
+        ``endpoint_count``.
+        Empty list if no repositories have been indexed yet.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        result = conn.execute(
+            "MATCH (r:Repo) "
+            "OPTIONAL MATCH (m:Method) WHERE m.repo_id = r.id "
+            "OPTIONAL MATCH (e:Endpoint) WHERE e.repo_id = r.id "
+            "RETURN r.name AS name, r.root_path AS root_path, "
+            "       count(DISTINCT m) AS method_count, count(DISTINCT e) AS endpoint_count",
+        )
+        return _rows(result, ["name", "root_path", "method_count", "endpoint_count"])
+    except Exception as exc:
+        log.error("list_repos(): %s", exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# Tool 11: index_repo_tool
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

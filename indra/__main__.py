@@ -1,6 +1,7 @@
 # python -m indra --repo /path --name my-repo [--db ~/.indra/indra.db]
 # python -m indra serve
 # python -m indra ui [--port 7700] [--db ~/.indra/indra.db]
+# python -m indra resolve [--db ~/.indra/indra.db]
 import argparse
 import sys
 from pathlib import Path
@@ -41,6 +42,17 @@ def main() -> None:
         help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
     )
 
+    # ---- resolve ----
+    resolve_parser = subparsers.add_parser(
+        "resolve",
+        help="Match RestCall URL patterns against Endpoints across all indexed repos",
+    )
+    resolve_parser.add_argument(
+        "--db",
+        default=_DEFAULT_DB_PATH,
+        help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
+    )
+
     # ---- legacy flat args: python -m indra --repo ... --name ... ----
     # Keep backwards compatibility: if the first arg starts with '--', treat
     # the whole invocation as an implicit 'index' command.
@@ -54,6 +66,19 @@ def main() -> None:
     if args.command == "ui":
         from indra.ui_server import run_ui
         run_ui(port=args.port, db_path=args.db or _DEFAULT_DB_PATH)
+        return
+
+    if args.command == "resolve":
+        import kuzu
+        from indra.cross_resolver import run_cross_resolution, load_indexed_repos
+        db = kuzu.Database(str(args.db))
+        conn = kuzu.Connection(db)
+        repos = load_indexed_repos(conn)
+        print(f"Indexed repos: {repos}")
+        result = run_cross_resolution(conn)
+        print(f"  matched:          {result['matched']}")
+        print(f"  unresolved:       {result['unresolved']}")
+        print(f"  depends_on_edges: {result['depends_on_edges']}")
         return
 
     if args.command == "index":
