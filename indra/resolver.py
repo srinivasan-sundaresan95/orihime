@@ -172,9 +172,9 @@ def _process_method_node(
     methods: list[dict],
     suffix_index: dict[str, list[str]],
     edges: list[CallEdge],
-    fqn_index: dict[str, str] | None = None,
-    impl_index: dict[str, str] | None = None,
-    local_method_ids: set[str] | None = None,
+    fqn_index: dict[str, str] | None,
+    impl_index: dict[str, str] | None,
+    local_method_ids: set[str],
 ) -> None:
     """Emit CallEdge objects for all call sites inside *method_node*."""
     caller_id = _find_enclosing_method(method_node, source_bytes, methods)

@@ -156,7 +156,7 @@ public class TestClass {
 # ---------------------------------------------------------------------------
 
 def test_ucb_inline_arg_produces_exactly_one_rest_call():
-    """P3-2.2: UCB chain as direct argument → exactly ONE rest_call (no duplication)."""
+    """P3-2.2: UCB chain as direct argument → exactly ONE rest_call with correct url_pattern."""
     src = b"""
 package com.example;
 public class TestClass {
@@ -169,6 +169,12 @@ public class TestClass {
     assert len(result.rest_calls) == 1, (
         f"Expected exactly 1 rest_call when UCB is passed inline, "
         f"got {len(result.rest_calls)}: {[rc['url_pattern'] for rc in result.rest_calls]}"
+    )
+    # The UCB chain is an opaque method_invocation arg to getForObject; the
+    # extractor cannot statically evaluate it at that call site → DYNAMIC.
+    assert result.rest_calls[0]["url_pattern"] == "DYNAMIC", (
+        f"Expected url_pattern 'DYNAMIC' for inline UCB arg, "
+        f"got {result.rest_calls[0]['url_pattern']!r}"
     )
 
 

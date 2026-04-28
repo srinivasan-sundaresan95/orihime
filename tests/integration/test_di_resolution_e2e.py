@@ -24,6 +24,7 @@ FIXTURES_DIR = os.path.join(
 DI_FIXTURES = [
     "WalletService.java",
     "WalletServiceImpl.java",
+    "NonServiceImpl.java",
     "DICallerClass.java",
 ]
 
@@ -95,6 +96,29 @@ def test_no_unresolved_call_from_fetch_balance(di_conn):
 
     assert len(rows) == 0, (
         f"Expected 0 UNRESOLVED_CALL edges from fetchBalance, "
+        f"got {len(rows)}: {rows}"
+    )
+
+
+@pytest.mark.integration
+def test_non_service_impl_not_wired(di_conn):
+    """NonServiceImpl implements WalletService but has no Spring annotation.
+
+    DI resolution must NOT create a CALLS edge to NonServiceImpl.getBalance —
+    only the @Service-annotated WalletServiceImpl must be wired.
+    """
+    result = di_conn.execute(
+        "MATCH (a:Method)-[:CALLS]->(b:Method) "
+        "WHERE b.fqn CONTAINS 'NonServiceImpl' "
+        "RETURN b.fqn"
+    )
+
+    rows = []
+    while result.has_next():
+        rows.append(result.get_next())
+
+    assert len(rows) == 0, (
+        f"Expected zero CALLS edges to NonServiceImpl (not annotated @Service), "
         f"got {len(rows)}: {rows}"
     )
 

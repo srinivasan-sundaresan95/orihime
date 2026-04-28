@@ -195,38 +195,35 @@ def _extract_url_from_binary_expression(
     resolved to a useful string (partial wildcard fallbacks are omitted because
     cross_resolver.py cannot match `*`-prefixed patterns against endpoint regexes).
     """
-    try:
-        if node.type != "binary_expression":
-            return None
-        if constant_index is None:
-            constant_index = {}
-
-        named_children = [c for c in node.children if c.is_named]
-        if len(named_children) < 2:
-            return None
-
-        left = named_children[0]
-        right = named_children[1]
-
-        left_value: str | None = None
-        right_value: str | None = None
-
-        if left.type == "string_literal":
-            left_value = _get_string_fragment(left, source_bytes)
-        elif left.type == "field_access":
-            left_value = _resolve_field_access_in_index(left, source_bytes, constant_index)
-
-        if right.type == "string_literal":
-            right_value = _get_string_fragment(right, source_bytes)
-        elif right.type == "field_access":
-            right_value = _resolve_field_access_in_index(right, source_bytes, constant_index)
-
-        if left_value is not None and right_value is not None:
-            return left_value + right_value
-
+    if node.type != "binary_expression":
         return None
-    except Exception:
+    if constant_index is None:
+        constant_index = {}
+
+    named_children = [c for c in node.children if c.is_named]
+    if len(named_children) < 2:
         return None
+
+    left = named_children[0]
+    right = named_children[1]
+
+    left_value: str | None = None
+    right_value: str | None = None
+
+    if left.type == "string_literal":
+        left_value = _get_string_fragment(left, source_bytes)
+    elif left.type == "field_access":
+        left_value = _resolve_field_access_in_index(left, source_bytes, constant_index)
+
+    if right.type == "string_literal":
+        right_value = _get_string_fragment(right, source_bytes)
+    elif right.type == "field_access":
+        right_value = _resolve_field_access_in_index(right, source_bytes, constant_index)
+
+    if left_value is not None and right_value is not None:
+        return left_value + right_value
+
+    return None
 
 
 def _get_chain_root_identifier(inv_node, source_bytes: bytes) -> str:
@@ -236,95 +233,84 @@ def _get_chain_root_identifier(inv_node, source_bytes: bytes) -> str:
     method_invocation has identifier 'UriComponentsBuilder' as its first child.
     Returns empty string if root cannot be determined.
     """
-    try:
-        current = inv_node
-        while True:
-            first_child = current.children[0] if current.children else None
-            if first_child is None:
-                return ""
-            if first_child.type == "method_invocation":
-                current = first_child
-            elif first_child.type == "identifier":
-                return _text(first_child, source_bytes)
-            elif first_child.type == "field_access":
-                # Walk field_access to root identifier
-                fa = first_child
-                while fa.type == "field_access":
-                    inner = fa.children[0] if fa.children else None
-                    if inner is None:
-                        return ""
-                    fa = inner
-                if fa.type == "identifier":
-                    return _text(fa, source_bytes)
-                return ""
-            else:
-                return ""
-    except Exception:
-        return ""
+    current = inv_node
+    while True:
+        first_child = current.children[0] if current.children else None
+        if first_child is None:
+            return ""
+        if first_child.type == "method_invocation":
+            current = first_child
+        elif first_child.type == "identifier":
+            return _text(first_child, source_bytes)
+        elif first_child.type == "field_access":
+            # Walk field_access to root identifier
+            fa = first_child
+            while fa.type == "field_access":
+                inner = fa.children[0] if fa.children else None
+                if inner is None:
+                    return ""
+                fa = inner
+            if fa.type == "identifier":
+                return _text(fa, source_bytes)
+            return ""
+        else:
+            return ""
 
 
 def _extract_url_from_uri_builder(call_node, source_bytes: bytes) -> "str | None":
-    """Extract URL pattern from UriComponentsBuilder.fromHttpUrl("base").path("/sub").build() chains.
+    """Extract URL from a UriComponentsBuilder chain: fromHttpUrl/fromUriString + optional .path().
 
-    Walk the method_invocation chain looking for:
-    - .fromHttpUrl("...")  or .fromUriString("...") → captures base URL
-    - .path("...")         → appends path segment
-    - .build() / .toUri() / .toUriString() → terminates the chain
-
-    Returns the assembled URL (base + path), or None if the pattern is not recognised.
+    Returns the assembled URL string, or None if the chain is not recognised.
     """
-    try:
-        base_url: str | None = None
-        path_segments: list[str] = []
+    base_url: str | None = None
+    path_segments: list[str] = []
 
-        chain: list = []
-        current = call_node
-        while current is not None and current.type == "method_invocation":
-            chain.append(current)
-            first = current.children[0] if current.children else None
-            if first is not None and first.type == "method_invocation":
-                current = first
-            else:
+    chain: list = []
+    current = call_node
+    while current is not None and current.type == "method_invocation":
+        chain.append(current)
+        first = current.children[0] if current.children else None
+        if first is not None and first.type == "method_invocation":
+            current = first
+        else:
+            break
+
+    # reversed(): chain[0] is outermost (.toUri()), chain[-1] is innermost (.fromHttpUrl(...))
+    for inv in reversed(chain):
+        method_name = ""
+        arg_list = None
+        children = inv.children
+        for i, c in enumerate(children):
+            if c.type == "argument_list":
+                arg_list = c
+                for j in range(i - 1, -1, -1):
+                    if children[j].type == "identifier":
+                        method_name = _text(children[j], source_bytes)
+                        break
                 break
 
-        # reversed(): chain[0] is outermost (.toUri()), chain[-1] is innermost (.fromHttpUrl(...))
-        for inv in reversed(chain):
-            method_name = ""
-            arg_list = None
-            children = inv.children
-            for i, c in enumerate(children):
-                if c.type == "argument_list":
-                    arg_list = c
-                    for j in range(i - 1, -1, -1):
-                        if children[j].type == "identifier":
-                            method_name = _text(children[j], source_bytes)
-                            break
-                    break
+        if method_name in ("fromHttpUrl", "fromUriString"):
+            if arg_list:
+                for arg in arg_list.children:
+                    if arg.type == "string_literal":
+                        frag = _find_first_child_of_type(arg, "string_fragment")
+                        if frag:
+                            base_url = _text(frag, source_bytes)
+                        break
+        elif method_name == "path":
+            if arg_list:
+                for arg in arg_list.children:
+                    if arg.type == "string_literal":
+                        frag = _find_first_child_of_type(arg, "string_fragment")
+                        if frag:
+                            path_segments.append(_text(frag, source_bytes))
+                        break
 
-            if method_name in ("fromHttpUrl", "fromUriString"):
-                if arg_list:
-                    for arg in arg_list.children:
-                        if arg.type == "string_literal":
-                            frag = _find_first_child_of_type(arg, "string_fragment")
-                            if frag:
-                                base_url = _text(frag, source_bytes)
-                            break
-            elif method_name == "path":
-                if arg_list:
-                    for arg in arg_list.children:
-                        if arg.type == "string_literal":
-                            frag = _find_first_child_of_type(arg, "string_fragment")
-                            if frag:
-                                path_segments.append(_text(frag, source_bytes))
-                            break
-
-        if base_url is None and not path_segments:
-            return None
-
-        result = (base_url or "") + "".join(path_segments)
-        return result if result else None
-    except Exception:
+    if base_url is None and not path_segments:
         return None
+
+    result = (base_url or "") + "".join(path_segments)
+    return result if result else None
 
 
 def _extract_static_final_strings(
