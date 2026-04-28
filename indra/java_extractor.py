@@ -64,11 +64,23 @@ def _walk_all(node):
 
 
 def _extract_annotation_info(
-    annotation_node, source_bytes: bytes
+    annotation_node, source_bytes: bytes, constant_index: "dict[str, str] | None" = None
 ) -> tuple[str, str]:
-    """Return (annotation_name, first_string_value_or_empty) from an annotation node."""
+    """Return (annotation_name, first_string_value_or_empty) from an annotation node.
+
+    If *constant_index* is provided (mapping ``ClassName.FIELD`` → path string),
+    field_access annotation values are resolved via the index.
+    """
     name = ""
     value = ""
+
+    def _resolve_field_access(node) -> str:
+        """Return the resolved path string for a field_access node, or its raw text."""
+        raw = _text(node, source_bytes)  # e.g. "RequestMapping.WALLET_STATUS"
+        if constant_index:
+            return constant_index.get(raw, "")
+        return ""
+
     for child in annotation_node.children:
         if child.type == "identifier":
             name = _text(child, source_bytes)
@@ -81,6 +93,10 @@ def _extract_annotation_info(
                     if frag:
                         value = _text(frag, source_bytes)
                     break
+                elif arg.type == "field_access":
+                    # Direct field_access as annotation value: @PostMapping(RequestMapping.USER_INFO)
+                    value = _resolve_field_access(arg)
+                    break
                 elif arg.type == "element_value_pair":
                     # check if key is "value" or "path"
                     pair_children = arg.children
@@ -88,17 +104,21 @@ def _extract_annotation_info(
                     val_nodes = [
                         c
                         for c in pair_children
-                        if c.type in ("string_literal", "array_initializer")
+                        if c.type in ("string_literal", "array_initializer", "field_access")
                     ]
                     if key_nodes and key_nodes[0].is_named:
                         key_text = _text(key_nodes[0], source_bytes)
                         if key_text in ("value", "path") and val_nodes:
-                            frag = _find_first_child_of_type(
-                                val_nodes[0], "string_fragment"
-                            )
-                            if frag:
-                                value = _text(frag, source_bytes)
-                                break
+                            val_node = val_nodes[0]
+                            if val_node.type == "field_access":
+                                value = _resolve_field_access(val_node)
+                            else:
+                                frag = _find_first_child_of_type(
+                                    val_node, "string_fragment"
+                                )
+                                if frag:
+                                    value = _text(frag, source_bytes)
+                            break
                         elif key_text == "method" and val_nodes:
                             # RequestMapping with explicit method=RequestMethod.GET etc.
                             pass
@@ -154,6 +174,46 @@ def _extract_package(root, source_bytes: bytes) -> str:
     return ""
 
 
+def _extract_static_final_strings(
+    class_body_node, class_name: str, source_bytes: bytes
+) -> dict[str, str]:
+    """Return a mapping of ``ClassName.FIELD_NAME`` → path string for all
+    ``public static final String FIELD = "..."`` declarations in *class_body_node*.
+    """
+    result: dict[str, str] = {}
+    for child in class_body_node.children:
+        if child.type != "field_declaration":
+            continue
+        # Check modifiers: must contain public, static, final
+        modifiers_node = _find_first_child_of_type(child, "modifiers")
+        if modifiers_node is None:
+            continue
+        modifier_text = _text(modifiers_node, source_bytes)
+        if "public" not in modifier_text or "static" not in modifier_text or "final" not in modifier_text:
+            continue
+        # Check type is String
+        type_node = _find_first_child_of_type(child, "type_identifier")
+        if type_node is None or _text(type_node, source_bytes) != "String":
+            continue
+        # Extract variable declarator(s)
+        for decl in child.children:
+            if decl.type != "variable_declarator":
+                continue
+            name_node = _find_first_child_of_type(decl, "identifier")
+            if name_node is None:
+                continue
+            field_name = _text(name_node, source_bytes)
+            # Find the string_literal value
+            for val_child in decl.children:
+                if val_child.type == "string_literal":
+                    frag = _find_first_child_of_type(val_child, "string_fragment")
+                    if frag:
+                        path_value = _text(frag, source_bytes)
+                        result[f"{class_name}.{field_name}"] = path_value
+                    break
+    return result
+
+
 @dataclass
 class JavaExtractor:
     language: str = "java"
@@ -162,7 +222,12 @@ class JavaExtractor:
     )
 
     def extract(
-        self, tree, source_bytes: bytes, file_id: str, repo_id: str
+        self,
+        tree,
+        source_bytes: bytes,
+        file_id: str,
+        repo_id: str,
+        constant_index: "dict[str, str] | None" = None,
     ) -> ExtractResult:
         result = ExtractResult()
         root = tree.root_node
@@ -170,7 +235,9 @@ class JavaExtractor:
         package = _extract_package(root, source_bytes)
 
         # Walk top-level children to find class declarations
-        self._extract_classes(root, source_bytes, file_id, repo_id, package, result)
+        self._extract_classes(
+            root, source_bytes, file_id, repo_id, package, result, constant_index
+        )
 
         return result
 
@@ -186,16 +253,42 @@ class JavaExtractor:
         repo_id: str,
         package: str,
         result: ExtractResult,
+        external_constant_index: "dict[str, str] | None" = None,
     ) -> None:
-        """Find all class/interface declarations under root and populate result."""
+        """Find all class/interface declarations under root and populate result.
+
+        Pass 1: accumulate ``public static final String`` constants from every class
+        into a per-file *constant_index*.  Pass 2 uses that index when resolving
+        annotation path references.
+        """
+        # --- Pass 1: build per-file constant index ---
+        constant_index: dict[str, str] = {}
+        if external_constant_index:
+            constant_index.update(external_constant_index)
+
+        for node in _walk_all(root):
+            if node.type == "class_declaration":
+                name_node = node.child_by_field_name("name") or _find_first_child_of_type(node, "identifier")
+                if name_node is None:
+                    continue
+                class_name = _text(name_node, source_bytes)
+                body_node = node.child_by_field_name("body") or _find_first_child_of_type(node, "class_body")
+                if body_node:
+                    constant_index.update(
+                        _extract_static_final_strings(body_node, class_name, source_bytes)
+                    )
+
+        # --- Pass 2: extract classes/methods/endpoints with resolved constants ---
         for node in _walk_all(root):
             if node.type == "class_declaration":
                 self._process_class(
-                    node, source_bytes, file_id, repo_id, package, result, is_interface=False
+                    node, source_bytes, file_id, repo_id, package, result,
+                    is_interface=False, constant_index=constant_index
                 )
             elif node.type == "interface_declaration":
                 self._process_class(
-                    node, source_bytes, file_id, repo_id, package, result, is_interface=True
+                    node, source_bytes, file_id, repo_id, package, result,
+                    is_interface=True, constant_index=constant_index
                 )
 
     def _process_class(
@@ -207,6 +300,7 @@ class JavaExtractor:
         package: str,
         result: ExtractResult,
         is_interface: bool,
+        constant_index: "dict[str, str] | None" = None,
     ) -> None:
         # Get class name — identifier child
         name_node = class_node.child_by_field_name("name")
@@ -227,7 +321,9 @@ class JavaExtractor:
         if modifiers_node:
             for ann_child in modifiers_node.children:
                 if ann_child.type in ("marker_annotation", "annotation"):
-                    ann_name, ann_value = _extract_annotation_info(ann_child, source_bytes)
+                    ann_name, ann_value = _extract_annotation_info(
+                        ann_child, source_bytes, constant_index
+                    )
                     if ann_name == "RequestMapping" and ann_value:
                         class_path_prefix = ann_value
                         break
@@ -259,6 +355,7 @@ class JavaExtractor:
                 fqn,
                 class_path_prefix,
                 result,
+                constant_index=constant_index,
             )
 
     def _process_methods(
@@ -271,6 +368,7 @@ class JavaExtractor:
         class_fqn: str,
         class_path_prefix: str,
         result: ExtractResult,
+        constant_index: "dict[str, str] | None" = None,
     ) -> None:
         for child in body_node.children:
             if child.type == "method_declaration":
@@ -283,6 +381,7 @@ class JavaExtractor:
                     class_fqn,
                     class_path_prefix,
                     result,
+                    constant_index=constant_index,
                 )
 
     def _process_method(
@@ -295,6 +394,7 @@ class JavaExtractor:
         class_fqn: str,
         class_path_prefix: str,
         result: ExtractResult,
+        constant_index: "dict[str, str] | None" = None,
     ) -> None:
         name_node = method_node.child_by_field_name("name")
         if name_node is None:
@@ -328,7 +428,9 @@ class JavaExtractor:
         if modifiers_node:
             for ann_child in modifiers_node.children:
                 if ann_child.type in ("marker_annotation", "annotation"):
-                    ann_name, ann_value = _extract_annotation_info(ann_child, source_bytes)
+                    ann_name, ann_value = _extract_annotation_info(
+                        ann_child, source_bytes, constant_index
+                    )
                     if ann_name in _ENDPOINT_ANNOTATIONS:
                         http_method = _infer_http_method_from_annotation(
                             ann_name, ann_child, source_bytes
@@ -377,8 +479,10 @@ class JavaExtractor:
     ) -> None:
         """
         method_invocation structure variants:
-          1. object.method(args)  → children: identifier(obj) . identifier(method) argument_list
-          2. method(args)         → children: identifier(method) argument_list
+          1. object.method(args)       → children: identifier(obj) . identifier(method) argument_list
+          2. method(args)              → children: identifier(method) argument_list
+          3. field_access.method(args) → children: field_access . identifier(method) argument_list
+             e.g. Helper.INSTANCE.doWork() where first child is field_access node
         """
         children = inv_node.children
         # Find method name: it's the identifier just before argument_list
@@ -394,10 +498,23 @@ class JavaExtractor:
                     if children[j].type == "identifier":
                         method_name_node = children[j]
                         break
-                # The identifier before the dot (if any) is the object
+                # The identifier before the dot (if any) is the object.
+                # Also handle field_access chain: extract root class name.
                 for j in range(0, i):
                     if children[j].type == "identifier" and children[j] is not method_name_node:
                         object_name = _text(children[j], source_bytes)
+                        break
+                    elif children[j].type == "field_access":
+                        # Walk field_access chain to find the root identifier
+                        # e.g. "Helper.INSTANCE" → root is "Helper"
+                        fa = children[j]
+                        while fa.type == "field_access":
+                            first = fa.children[0] if fa.children else None
+                            if first is None:
+                                break
+                            fa = first
+                        if fa.type == "identifier":
+                            object_name = _text(fa, source_bytes)
                         break
                 break
 

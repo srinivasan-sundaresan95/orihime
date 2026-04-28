@@ -357,7 +357,8 @@ def search_symbol(query: str) -> list[dict]:
         class_result = conn.execute(
             "MATCH (c:Class) "
             "WHERE lower(c.name) CONTAINS $q "
-            "RETURN c.fqn AS fqn, c.file_id AS file_id",
+            "RETURN c.fqn AS fqn, c.file_id AS file_id "
+            "LIMIT 50",
             {"q": lower_query},
         )
         for row in _rows(class_result, ["fqn", "file_id"]):
@@ -366,7 +367,8 @@ def search_symbol(query: str) -> list[dict]:
         method_result = conn.execute(
             "MATCH (m:Method) "
             "WHERE lower(m.name) CONTAINS $q "
-            "RETURN m.fqn AS fqn, m.file_id AS file_id",
+            "RETURN m.fqn AS fqn, m.file_id AS file_id "
+            "LIMIT 50",
             {"q": lower_query},
         )
         for row in _rows(method_result, ["fqn", "file_id"]):

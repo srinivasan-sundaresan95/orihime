@@ -259,10 +259,9 @@ class KotlinExtractor:
             modifiers = _child_by_type(class_node, "modifiers")
             class_annotations = _collect_annotations(modifiers, src)
 
-            name_node = _child_by_type(class_node, "identifier")
-            if name_node is None:
+            class_name = _resolve_class_name(class_node, src)
+            if class_name is None:
                 continue
-            class_name = _node_text(name_node, src).strip()
             fqn = f"{package}.{class_name}" if package else class_name
 
             is_interface = class_node.type == "interface_declaration"
@@ -342,6 +341,56 @@ class KotlinExtractor:
                     rc = _find_rest_calls_in_node(fn_body, src, method_id, repo_id)
                     rest_calls.extend(rc)
 
+        # Collect top-level function declarations (not inside any class/object)
+        # These include extension functions and plain top-level functions.
+        # We emit a synthetic "<FileNameKt>" class for them.
+        top_level_fns = _iter_top_level_function_nodes(root)
+        fn_list = list(top_level_fns)
+        if fn_list:
+            kt_class_name = _synthetic_kt_class_name(file_id)
+            kt_fqn = f"{package}.{kt_class_name}" if package else kt_class_name
+            kt_class_id = str(uuid.uuid4())
+            classes.append({
+                "id": kt_class_id,
+                "name": kt_class_name,
+                "fqn": kt_fqn,
+                "file_id": file_id,
+                "repo_id": repo_id,
+                "is_interface": False,
+                "annotations": [],
+            })
+            for fn_node in fn_list:
+                fn_modifiers = _child_by_type(fn_node, "modifiers")
+                fn_annotations = _collect_annotations(fn_modifiers, src)
+
+                fn_name_node = _child_by_type(fn_node, "identifier")
+                if fn_name_node is None:
+                    continue
+                fn_name = _node_text(fn_name_node, src).strip()
+                fn_fqn = f"{kt_fqn}.{fn_name}"
+
+                is_suspend = _is_suspend(fn_modifiers, src)
+                line_start = fn_node.start_point[0] + 1  # 1-based
+
+                method_id = str(uuid.uuid4())
+                methods.append({
+                    "id": method_id,
+                    "name": fn_name,
+                    "fqn": fn_fqn,
+                    "class_id": kt_class_id,
+                    "file_id": file_id,
+                    "repo_id": repo_id,
+                    "line_start": line_start,
+                    "is_suspend": is_suspend,
+                    "annotations": fn_annotations,
+                })
+
+                # Detect RestClient / WebClient calls in top-level function body
+                fn_body = _child_by_type(fn_node, "function_body")
+                if fn_body:
+                    rc = _find_rest_calls_in_node(fn_body, src, method_id, repo_id)
+                    rest_calls.extend(rc)
+
         return ExtractResult(
             classes=classes,
             methods=methods,
@@ -362,6 +411,50 @@ _CLASS_NODE_TYPES = frozenset({
 })
 
 
+def _resolve_class_name(class_node, src: bytes) -> str | None:
+    """Return the class/object name for a class-like node.
+
+    Handles:
+    - ``class_declaration``, ``object_declaration``, ``interface_declaration``:
+      have a direct ``identifier`` child that holds the name.
+    - ``companion_object`` with an explicit name: has an ``identifier`` child.
+    - ``companion_object`` without a name (anonymous): synthesize name as
+      ``<EnclosingClassName>Companion`` by walking up to the enclosing class.
+    """
+    name_node = _child_by_type(class_node, "identifier")
+    if name_node is not None:
+        return _node_text(name_node, src).strip()
+
+    # Anonymous companion object — derive name from enclosing class
+    if class_node.type == "companion_object":
+        # parent is class_body, grandparent is the enclosing class declaration
+        parent = class_node.parent  # class_body
+        if parent is not None:
+            grandparent = parent.parent  # class_declaration (or object_declaration)
+            if grandparent is not None:
+                enclosing_name_node = _child_by_type(grandparent, "identifier")
+                if enclosing_name_node is not None:
+                    enclosing_name = _node_text(enclosing_name_node, src).strip()
+                    return f"{enclosing_name}Companion"
+        return "Companion"  # fallback if no enclosing class found
+
+    return None
+
+
+def _synthetic_kt_class_name(file_id: str) -> str:
+    """Derive a synthetic Kotlin top-level class name from a file identifier.
+
+    If *file_id* looks like a ``.kt`` filename (e.g. ``ExtensionFunctions.kt``),
+    return ``ExtensionFunctionsKt``.  Otherwise return ``TopLevelFunctionsKt``.
+    """
+    if file_id.endswith(".kt"):
+        stem = file_id[:-3]
+        # Strip any leading path components
+        stem = stem.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        return f"{stem}Kt"
+    return "TopLevelFunctionsKt"
+
+
 def _iter_class_nodes(node):
     """Yield all class/object/interface declarations at any depth."""
     for child in node.children:
@@ -370,6 +463,17 @@ def _iter_class_nodes(node):
             yield from _iter_class_nodes(child)
         else:
             yield from _iter_class_nodes(child)
+
+
+def _iter_top_level_function_nodes(root_node):
+    """Yield ``function_declaration`` nodes that are direct children of the source file root.
+
+    These represent top-level Kotlin functions (including extension functions)
+    that are NOT enclosed in any class, object, or interface body.
+    """
+    for child in root_node.children:
+        if child.type == "function_declaration":
+            yield child
 
 
 def _iter_function_nodes(class_body_node):

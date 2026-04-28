@@ -1,10 +1,13 @@
 # python -m indra --repo /path --name my-repo [--db ~/.indra/indra.db]
 # python -m indra serve
+# python -m indra ui [--port 7700] [--db ~/.indra/indra.db]
 import argparse
 import sys
 from pathlib import Path
 
 from indra.indexer import index_repo
+
+_DEFAULT_DB_PATH = str(Path.home() / ".indra" / "indra.db")
 
 
 def main() -> None:
@@ -17,12 +20,26 @@ def main() -> None:
     index_parser.add_argument("--name", required=True, help="Logical name for the repository")
     index_parser.add_argument(
         "--db",
-        default=str(Path.home() / ".indra" / "indra.db"),
+        default=_DEFAULT_DB_PATH,
         help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
     )
 
     # ---- serve ----
     subparsers.add_parser("serve", help="Start the Indra MCP server (stdio transport)")
+
+    # ---- ui ----
+    ui_parser = subparsers.add_parser("ui", help="Start the Indra web UI (browser)")
+    ui_parser.add_argument(
+        "--port",
+        type=int,
+        default=7700,
+        help="TCP port to listen on (default: 7700)",
+    )
+    ui_parser.add_argument(
+        "--db",
+        default=None,
+        help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
+    )
 
     # ---- legacy flat args: python -m indra --repo ... --name ... ----
     # Keep backwards compatibility: if the first arg starts with '--', treat
@@ -32,6 +49,11 @@ def main() -> None:
     if args.command == "serve":
         from indra.mcp_server import cli
         cli()
+        return
+
+    if args.command == "ui":
+        from indra.ui_server import run_ui
+        run_ui(port=args.port, db_path=args.db or _DEFAULT_DB_PATH)
         return
 
     if args.command == "index":

@@ -114,3 +114,51 @@ def test_index_repo_writes_endpoints():
     result = conn.execute("MATCH (e:Endpoint) RETURN count(e)")
     count = result.get_next()[0]
     assert count > 0, "Expected at least one Endpoint node in KuzuDB"
+
+
+# ---------------------------------------------------------------------------
+# 6. No duplicate CALLS edges
+# ---------------------------------------------------------------------------
+
+
+def test_no_duplicate_calls_edges():
+    """After indexing, there must be no duplicate (caller_id, callee_id) CALLS pairs."""
+    db_path = _make_db_path()
+    index_repo(FIXTURES_DIR, "test-repo", db_path)
+
+    db = kuzu.Database(str(db_path))
+    conn = kuzu.Connection(db)
+
+    result = conn.execute(
+        "MATCH (a:Method)-[r:CALLS]->(b:Method) RETURN a.id, b.id"
+    )
+    pairs: list[tuple[str, str]] = []
+    while result.has_next():
+        row = result.get_next()
+        pairs.append((row[0], row[1]))
+
+    unique_pairs = list(set(pairs))
+    assert len(pairs) == len(unique_pairs), (
+        f"Found {len(pairs) - len(unique_pairs)} duplicate CALLS edges. "
+        f"Total={len(pairs)}, unique={len(unique_pairs)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. Parallel output matches serial output
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_matches_serial():
+    """max_workers=1 (serial) and max_workers=4 (parallel) must produce identical summaries."""
+    db_serial = _make_db_path()
+    db_parallel = _make_db_path()
+
+    summary_serial = index_repo(FIXTURES_DIR, "test-repo", db_serial, max_workers=1)
+    summary_parallel = index_repo(FIXTURES_DIR, "test-repo", db_parallel, max_workers=4)
+
+    assert summary_serial == summary_parallel, (
+        f"Serial and parallel indexing produced different counts:\n"
+        f"  serial  ={summary_serial}\n"
+        f"  parallel={summary_parallel}"
+    )
