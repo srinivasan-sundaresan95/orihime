@@ -49,14 +49,52 @@ from indra.walker import walk_repo
 # Top-level picklable worker function (must be at module level for pickle)
 # ---------------------------------------------------------------------------
 
+def _build_constant_index(work_items: list[tuple]) -> dict[str, str]:
+    """Pre-pass: collect all public static final String constants from Java files.
+
+    Returns a merged dict mapping "ClassName.FIELD" → "/path/string" across all
+    Java files in the repo.  This enables cross-file constant resolution for
+    endpoint annotations like @GetMapping(path = RequestMapping.WALLET_STATUS).
+    """
+    from pathlib import Path as _Path
+    from indra.language import get_parser as _get_parser
+    import indra.java_extractor as _jex
+
+    index: dict[str, str] = {}
+    for file_path_str, lang, _file_id, _repo_id in work_items:
+        if lang != "java":
+            continue
+        try:
+            src = _Path(file_path_str).read_bytes()
+            parser = _get_parser("java")
+            tree = parser.parse(src)
+            root = tree.root_node
+            for node in _jex._walk_all(root):
+                if node.type in ("class_declaration", "interface_declaration"):
+                    name_node = (
+                        node.child_by_field_name("name")
+                        or _jex._find_first_child_of_type(node, "identifier")
+                    )
+                    if name_node is None:
+                        continue
+                    class_name = _jex._text(name_node, src)
+                    body = node.child_by_field_name("body") or _jex._find_first_child_of_type(node, "class_body")
+                    if body:
+                        index.update(_jex._extract_static_final_strings(body, class_name, src))
+        except Exception:
+            pass
+    return index
+
+
 def _parse_file(args: tuple) -> ParseResult:
     """Parse and extract a single source file — runs in a worker process.
 
     Parameters (packed in *args* to satisfy ProcessPoolExecutor.map style):
-        file_path_str : str   — absolute path of the file
-        lang          : str   — language key (e.g. "java", "kotlin")
-        file_id       : str   — pre-computed md5 hex digest of the path
-        repo_id       : str   — pre-computed md5 hex digest of the repo name
+        file_path_str   : str            — absolute path of the file
+        lang            : str            — language key (e.g. "java", "kotlin")
+        file_id         : str            — pre-computed md5 hex digest of the path
+        repo_id         : str            — pre-computed md5 hex digest of the repo name
+        constant_index  : dict[str, str] — cross-file constant index (may be empty)
 
     Returns:
         ParseResult with all extracted nodes as plain dicts.
@@ -65,7 +103,7 @@ def _parse_file(args: tuple) -> ParseResult:
     the DB must stay in the main process.  All imports below are safe to
     run in a child process.
     """
-    file_path_str, lang, file_id, repo_id = args
+    file_path_str, lang, file_id, repo_id, constant_index = args
 
     # Import inside the function so child processes get a clean slate and we
     # avoid accidentally pickling module-level state.
@@ -93,7 +131,13 @@ def _parse_file(args: tuple) -> ParseResult:
     if extractor is None:
         return result  # src_bytes retained so main process can still resolve calls
 
-    extract_result = extractor.extract(tree, src, file_id, repo_id)
+    # Pass the cross-file constant index so endpoint annotations that reference
+    # static fields defined in other files (e.g. RequestMapping.WALLET_STATUS)
+    # are resolved to real path strings.
+    extract_kwargs: dict = {}
+    if constant_index and lang == "java":
+        extract_kwargs["constant_index"] = constant_index
+    extract_result = extractor.extract(tree, src, file_id, repo_id, **extract_kwargs)
     result.classes = extract_result.classes
     result.methods = extract_result.methods
     result.endpoints = extract_result.endpoints
@@ -223,10 +267,18 @@ def index_repo(
         "call_edges": 0,
     }
 
-    work_items: list[tuple[str, str, str, str]] = []
+    work_items_base: list[tuple[str, str, str, str]] = []
     for file_path, lang in walk_repo(repo_path):
         file_id = hashlib.md5(str(file_path).encode()).hexdigest()
-        work_items.append((str(file_path), lang, file_id, repo_id))
+        work_items_base.append((str(file_path), lang, file_id, repo_id))
+
+    # Pre-pass: build cross-file constant index from all Java files so that
+    # endpoint annotations referencing static fields (e.g. RequestMapping.WALLET_STATUS)
+    # in other files are resolved to real path strings.
+    constant_index = _build_constant_index(work_items_base)
+
+    # Pack constant_index into each work item tuple for _parse_file.
+    work_items: list[tuple] = [(*item, constant_index) for item in work_items_base]
 
     # -----------------------------------------------------------------------
     # Phase 1 — parse+extract in parallel worker processes
@@ -262,7 +314,7 @@ def index_repo(
     # Accumulate all methods across files for cross-file FQN resolution
     all_methods: list[dict] = []
 
-    for _file_path_str, _lang, file_id, _repo_id in work_items:
+    for _file_path_str, _lang, file_id, _repo_id, _const_idx in work_items:
         pr = parse_results[file_id]
 
         # Insert File node
