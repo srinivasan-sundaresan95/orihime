@@ -1,5 +1,5 @@
 .venv/
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *.db
 *.db-lock
@@ -8,4 +8,4 @@ __pycache__/
 dist/
 build/
 .gitnexus/
-__pycache__/
+**/__pycache__/
