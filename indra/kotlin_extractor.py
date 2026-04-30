@@ -371,6 +371,25 @@ class KotlinExtractor:
                 "annotations": class_annotations,
             })
 
+            # Synthetic <init> method — lets the resolver emit CALLS edges for
+            # `ClassName(...)` constructor calls without any schema changes.
+            # Only regular classes can be instantiated this way; object
+            # declarations (singletons), companion objects, and interfaces
+            # cannot be constructed via a call_expression.
+            if class_node.type == "class_declaration":
+                methods.append({
+                    "id": str(uuid.uuid4()),
+                    "name": "<init>",
+                    "fqn": f"{fqn}.<init>",
+                    "class_id": class_id,
+                    "file_id": file_id,
+                    "repo_id": repo_id,
+                    "line_start": 0,
+                    "is_suspend": False,
+                    "annotations": [],
+                    "generated": False,
+                })
+
             # Extract EXTENDS/IMPLEMENTS inheritance edges (class and object only)
             if class_node.type in ("class_declaration", "object_declaration"):
                 inh = _extract_kotlin_supertypes(class_node, src, fqn, class_id, package)

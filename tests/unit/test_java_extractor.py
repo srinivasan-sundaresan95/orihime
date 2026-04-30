@@ -79,7 +79,11 @@ def test_method_ids_non_empty(extract_result):
 
 def test_method_line_start_positive(extract_result):
     for m in extract_result.methods:
-        assert m["line_start"] > 0, f"Method {m['name']} has line_start={m['line_start']}"
+        # Synthetic <init> methods use line_start=0; all real methods must be > 0
+        if m["name"] == "<init>":
+            assert m["line_start"] == 0, f"<init> should have line_start=0, got {m['line_start']}"
+        else:
+            assert m["line_start"] > 0, f"Method {m['name']} has line_start={m['line_start']}"
 
 
 def test_method_file_and_repo(extract_result):

@@ -142,4 +142,8 @@ def test_method_class_ids_reference_known_classes(result):
 
 def test_line_starts_positive(result):
     for m in result.methods:
-        assert m["line_start"] > 0, f"line_start not > 0 for {m['name']}"
+        # Synthetic <init> methods use line_start=0; all real methods must be > 0
+        if m["name"] == "<init>":
+            assert m["line_start"] == 0, f"<init> should have line_start=0, got {m['line_start']}"
+        else:
+            assert m["line_start"] > 0, f"line_start not > 0 for {m['name']}"

@@ -59,6 +59,16 @@ _NODE_TABLES = [
         repo_id STRING,
         PRIMARY KEY(id)
     )""",
+    """CREATE NODE TABLE EntityRelation(
+        id STRING,
+        source_class_id STRING,
+        target_class_fqn STRING,
+        field_name STRING,
+        relation_type STRING,
+        fetch_type STRING,
+        repo_id STRING,
+        PRIMARY KEY(id)
+    )""",
 ]
 
 _REL_TABLES = [
@@ -71,6 +81,7 @@ _REL_TABLES = [
     "CREATE REL TABLE DEPENDS_ON(FROM Repo TO Repo)",
     "CREATE REL TABLE EXTENDS(FROM Class TO Class)",
     "CREATE REL TABLE IMPLEMENTS(FROM Class TO Class)",
+    "CREATE REL TABLE HAS_RELATION(FROM Class TO EntityRelation)",
 ]
 
 _DROP_REL_TABLES = [
@@ -83,9 +94,11 @@ _DROP_REL_TABLES = [
     "DEPENDS_ON",
     "EXTENDS",
     "IMPLEMENTS",
+    "HAS_RELATION",
 ]
 
 _DROP_NODE_TABLES = [
+    "EntityRelation",
     "RestCall",
     "Endpoint",
     "Method",

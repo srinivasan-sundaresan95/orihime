@@ -24,6 +24,7 @@ class ExtractResult:
     rest_calls: list[dict] = field(default_factory=list)
     impl_map: dict[str, str] = field(default_factory=dict)
     inheritance_edges: list[dict] = field(default_factory=list)
+    entity_relations: list[dict] = field(default_factory=list)
 
 
 class LanguageExtractor(Protocol):

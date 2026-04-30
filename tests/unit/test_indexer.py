@@ -12,7 +12,7 @@ from indra.indexer import index_repo
 # The fixtures directory contains Sample.java — a single-file mini-repo
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"
 
-_SUMMARY_KEYS = {"repos", "files", "classes", "methods", "endpoints", "rest_calls", "call_edges", "inheritance_edges"}
+_SUMMARY_KEYS = {"repos", "files", "classes", "methods", "endpoints", "rest_calls", "call_edges", "inheritance_edges", "entity_relations"}
 
 
 def _make_db_path() -> pathlib.Path:

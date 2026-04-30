@@ -89,12 +89,39 @@ def resolve_calls(
         simple = fqn.rsplit(".", 1)[-1]
         _suffix_index.setdefault(simple, []).append(mid)
 
+    # Build constructor index: "SimpleClassName.<init>" → list[method_id].
+    # For FQN "com.example.Foo.<init>" the key is "Foo.<init>".
+    # This is used by the constructor-call handlers so that `new Foo(...)` (Java)
+    # and `Foo(...)` (Kotlin) can be resolved without ambiguity even when multiple
+    # packages have a class with the same name.
+    _ctor_index: dict[str, list[str]] = {}
+    for fqn, mid in fqn_index.items():
+        if fqn.endswith(".<init>"):
+            # "pkg.ClassName.<init>" → split off last two segments
+            parts = fqn.rsplit(".", 2)  # ["pkg", "ClassName", "<init>"]
+            if len(parts) >= 2:
+                class_simple = parts[-2]
+                key = f"{class_simple}.<init>"
+                _ctor_index.setdefault(key, []).append(mid)
+
     # When impl_index is active, restrict suffix matches to local methods to
     # prevent accidental wiring to unregistered impl classes.  Cross-file
     # resolution goes through the impl_index gate or becomes UNRESOLVED.
     _local_method_ids: set[str] = (
         {m["id"] for m in methods} if impl_index is not None else set()
     )
+
+    # Build a lookup from simple class name → <init> method_id for
+    # matching Java constructor_declaration nodes to their synthetic <init>.
+    # E.g. "Address" → id-of-Address.<init>
+    _init_by_class_name: dict[str, str] = {}
+    for m in methods:
+        if m["name"] == "<init>":
+            # fqn is "pkg.ClassName.<init>" — extract ClassName
+            parts = m["fqn"].rsplit(".", 2)
+            if len(parts) >= 2:
+                class_simple = parts[-2]
+                _init_by_class_name[class_simple] = m["id"]
 
     root = tree.root_node
 
@@ -110,6 +137,20 @@ def resolve_calls(
                 fqn_index=fqn_index,
                 impl_index=impl_index,
                 local_method_ids=_local_method_ids,
+                ctor_index=_ctor_index,
+            )
+        elif node.type == "constructor_declaration":
+            # Java constructor body: treat as its class's <init> method
+            _process_constructor_body(
+                node,
+                source_bytes,
+                _init_by_class_name,
+                _suffix_index,
+                edges,
+                fqn_index=fqn_index,
+                impl_index=impl_index,
+                local_method_ids=_local_method_ids,
+                ctor_index=_ctor_index,
             )
 
     return edges
@@ -176,6 +217,7 @@ def _process_method_node(
     fqn_index: dict[str, str] | None,
     impl_index: dict[str, str] | None,
     local_method_ids: set[str],
+    ctor_index: "dict[str, list[str]] | None" = None,
 ) -> None:
     """Emit CallEdge objects for all call sites inside *method_node*."""
     caller_id = _find_enclosing_method(method_node, source_bytes, methods)
@@ -205,6 +247,16 @@ def _process_method_node(
                 fqn_index=fqn_index,
                 impl_index=impl_index,
                 local_method_ids=local_method_ids,
+                ctor_index=ctor_index,
+            )
+        elif node.type == "object_creation_expression":
+            # Java: `new ClassName(...)` — emit a CALLS edge to ClassName.<init>
+            _process_constructor_call(
+                node,
+                source_bytes,
+                caller_id,
+                ctor_index or {},
+                edges,
             )
 
 
@@ -284,6 +336,7 @@ def _process_invocation(
     fqn_index: dict[str, str] | None = None,
     impl_index: dict[str, str] | None = None,
     local_method_ids: set[str] | None = None,
+    ctor_index: "dict[str, list[str]] | None" = None,
 ) -> None:
     """Emit one CallEdge for this invocation node."""
     name = _get_invocation_name(inv_node, source_bytes)
@@ -318,10 +371,155 @@ def _process_invocation(
         if callee_id is not None:
             edge_type = "CALLS"
         else:
+            # Kotlin constructor fallback: CapitalizedName() → look for
+            # ClassName.<init> in the ctor_index.  This handles `Point(x, y)`
+            # and `Rectangle(tl, br)` Kotlin call_expression nodes where the
+            # callee resolves to a class constructor.
+            if name and name[0].isupper() and ctor_index:
+                init_name = f"{name}.<init>"
+                init_matches = ctor_index.get(init_name, [])
+                if init_matches:
+                    for mid in init_matches:
+                        edges.append(CallEdge(
+                            caller_id=caller_id,
+                            callee_id=mid,
+                            edge_type="CALLS",
+                            callee_name=init_name,
+                        ))
+                    return
             callee_id = str(uuid.uuid4())
             edge_type = "UNRESOLVED_CALL"
     else:
+        # Kotlin constructor fallback (no impl_index): CapitalizedName() →
+        # look for ClassName.<init> in the ctor_index.
+        if name and name[0].isupper() and ctor_index:
+            init_name = f"{name}.<init>"
+            init_matches = ctor_index.get(init_name, [])
+            if init_matches:
+                for mid in init_matches:
+                    edges.append(CallEdge(
+                        caller_id=caller_id,
+                        callee_id=mid,
+                        edge_type="CALLS",
+                        callee_name=init_name,
+                    ))
+                return
         callee_id = str(uuid.uuid4())
         edge_type = "UNRESOLVED_CALL"
 
     edges.append(CallEdge(caller_id=caller_id, callee_id=callee_id, edge_type=edge_type, callee_name=name))
+
+
+def _process_constructor_call(
+    ctor_node,
+    source_bytes: bytes,
+    caller_id: str,
+    ctor_index: dict[str, list[str]],
+    edges: list[CallEdge],
+) -> None:
+    """Emit CALLS edges for a Java ``object_creation_expression`` node.
+
+    Resolves the class being constructed by extracting the ``type_identifier``
+    from the ``type`` child (handles both ``type_identifier`` and
+    ``generic_type``), then looks up ``ClassName.<init>`` in *ctor_index*
+    (a secondary index keyed by ``SimpleClassName.<init>``).
+    External classes (not in the index) are silently ignored — no UNRESOLVED
+    edge is emitted so as not to pollute the graph with noise from stdlib types
+    such as ``new ArrayList()``.
+    """
+    # The class name is either a direct type_identifier child or nested inside
+    # a generic_type node (e.g. new HashMap<String, Integer>()).
+    class_name: str | None = None
+    for child in ctor_node.children:
+        if child.type == "type_identifier":
+            class_name = _text(child, source_bytes)
+            break
+        if child.type == "generic_type":
+            # First type_identifier inside generic_type is the raw class name
+            for sub in child.children:
+                if sub.type == "type_identifier":
+                    class_name = _text(sub, source_bytes)
+                    break
+            if class_name:
+                break
+
+    if not class_name:
+        return
+
+    init_name = f"{class_name}.<init>"
+    init_matches = ctor_index.get(init_name, [])
+    # Only emit CALLS when the <init> method is present in the index (i.e. the
+    # class is declared in the indexed codebase).  External / stdlib classes are
+    # silently skipped.
+    for mid in init_matches:
+        edges.append(CallEdge(
+            caller_id=caller_id,
+            callee_id=mid,
+            edge_type="CALLS",
+            callee_name=init_name,
+        ))
+
+
+def _process_constructor_body(
+    ctor_decl_node,
+    source_bytes: bytes,
+    init_by_class_name: dict[str, str],
+    suffix_index: dict[str, list[str]],
+    edges: list[CallEdge],
+    fqn_index: dict[str, str] | None,
+    impl_index: dict[str, str] | None,
+    local_method_ids: set[str],
+    ctor_index: "dict[str, list[str]] | None" = None,
+) -> None:
+    """Walk a Java ``constructor_declaration`` body and emit CALLS edges.
+
+    The caller_id for all edges is the synthetic ``<init>`` method that
+    corresponds to this constructor's class.  The constructor name is used to
+    look up the ``<init>`` method_id in *init_by_class_name*.
+    """
+    # Resolve the class name from the constructor identifier child
+    name_node = ctor_decl_node.child_by_field_name("name")
+    if name_node is None:
+        for c in ctor_decl_node.children:
+            if c.type == "identifier":
+                name_node = c
+                break
+    if name_node is None:
+        return
+
+    class_name = _text(name_node, source_bytes)
+    caller_id = init_by_class_name.get(class_name)
+    if caller_id is None:
+        return
+
+    # Find the constructor body (constructor_body field)
+    body_node = ctor_decl_node.child_by_field_name("body")
+    if body_node is None:
+        for c in ctor_decl_node.children:
+            if c.type in ("constructor_body", "block"):
+                body_node = c
+                break
+    if body_node is None:
+        return
+
+    for node in _walk_all(body_node):
+        if node.type in ("method_invocation", "call_expression"):
+            _process_invocation(
+                node,
+                source_bytes,
+                caller_id,
+                suffix_index,
+                edges,
+                fqn_index=fqn_index,
+                impl_index=impl_index,
+                local_method_ids=local_method_ids,
+                ctor_index=ctor_index,
+            )
+        elif node.type == "object_creation_expression":
+            _process_constructor_call(
+                node,
+                source_bytes,
+                caller_id,
+                ctor_index or {},
+                edges,
+            )

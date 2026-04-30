@@ -471,6 +471,105 @@ def _extract_inheritance(
     return edges
 
 
+_JPA_RELATION_ANNOTATIONS: frozenset[str] = frozenset({
+    "OneToMany", "ManyToOne", "OneToOne", "ManyToMany",
+})
+
+
+def _extract_entity_relations(
+    class_node,
+    source_bytes: bytes,
+    class_id: str,
+    class_fqn: str,
+    repo_id: str,
+    import_map: dict[str, str],
+    class_annotations: list[str],
+) -> list[dict]:
+    """Extract JPA relation fields from an @Entity class.
+
+    Returns list of dicts matching the EntityRelation node schema.
+    Only called when 'Entity' or 'MappedSuperclass' is in class_annotations.
+    """
+    import hashlib as _hashlib
+
+    if "Entity" not in class_annotations and "MappedSuperclass" not in class_annotations:
+        return []
+
+    # Derive package from FQN (e.g. "com.example.Order" → "com.example")
+    package = class_fqn.rsplit(".", 1)[0] if "." in class_fqn else ""
+
+    relations = []
+    body = class_node.child_by_field_name("body") or _find_first_child_of_type(class_node, "class_body")
+    if body is None:
+        return []
+
+    for child in body.children:
+        if child.type != "field_declaration":
+            continue
+        # Collect annotations on this field (both annotation and marker_annotation nodes)
+        field_annots: list[str] = []
+        for mod in child.children:
+            if mod.type == "modifiers":
+                for a in mod.children:
+                    if a.type in ("annotation", "marker_annotation"):
+                        name_node = a.child_by_field_name("name") or _find_first_child_of_type(a, "identifier")
+                        if name_node:
+                            field_annots.append(_text(name_node, source_bytes))
+
+        relation_type = next((a for a in field_annots if a in _JPA_RELATION_ANNOTATIONS), None)
+        if relation_type is None:
+            continue
+
+        # Extract fetch type from annotation arguments: fetch = FetchType.LAZY or EAGER
+        fetch_type = "LAZY"  # JPA default
+        for mod in child.children:
+            if mod.type == "modifiers":
+                for a in mod.children:
+                    if a.type == "annotation":
+                        name_node = a.child_by_field_name("name") or _find_first_child_of_type(a, "identifier")
+                        if name_node and _text(name_node, source_bytes) == relation_type:
+                            args = a.child_by_field_name("arguments") or _find_first_child_of_type(a, "annotation_argument_list")
+                            if args:
+                                args_text = _text(args, source_bytes)
+                                if "EAGER" in args_text:
+                                    fetch_type = "EAGER"
+
+        # Extract field name and target type
+        field_name = ""
+        target_simple = ""
+        for fc in child.children:
+            if fc.type == "variable_declarator":
+                name_n = fc.child_by_field_name("name") or _find_first_child_of_type(fc, "identifier")
+                if name_n:
+                    field_name = _text(name_n, source_bytes)
+            elif fc.type in ("type_identifier", "generic_type"):
+                # e.g. List<Order> or Order
+                for ti in _walk_all(fc):
+                    if ti.type == "type_identifier":
+                        candidate = _text(ti, source_bytes)
+                        if candidate not in ("List", "Set", "Collection", "Optional"):
+                            target_simple = candidate
+                            break
+
+        if not target_simple:
+            continue
+
+        target_fqn = import_map.get(target_simple, f"{package}.{target_simple}" if package else target_simple)
+        rel_id = _hashlib.md5(f"{class_id}:{field_name}:{relation_type}".encode()).hexdigest()
+
+        relations.append({
+            "id": rel_id,
+            "source_class_id": class_id,
+            "target_class_fqn": target_fqn,
+            "field_name": field_name,
+            "relation_type": relation_type,
+            "fetch_type": fetch_type,
+            "repo_id": repo_id,
+        })
+
+    return relations
+
+
 def _extract_impl_map(root, source_bytes: bytes, package: str) -> dict[str, str]:
     # Build import map: simple_name → fully-qualified name
     import_map: dict[str, str] = _build_import_map(root, source_bytes)
@@ -649,11 +748,36 @@ class JavaExtractor:
             }
         )
 
+        # Synthetic <init> method — lets the resolver emit CALLS edges for
+        # `new ClassName(...)` constructor calls without any schema changes.
+        if not is_interface:
+            result.methods.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": "<init>",
+                    "fqn": f"{fqn}.<init>",
+                    "class_id": class_id,
+                    "file_id": file_id,
+                    "repo_id": repo_id,
+                    "line_start": 0,
+                    "is_suspend": False,
+                    "annotations": [],
+                    "generated": False,
+                }
+            )
+
         # Extract EXTENDS/IMPLEMENTS inheritance edges
         inheritance = _extract_inheritance(
             class_node, source_bytes, fqn, class_id, import_map or {}, package
         )
         result.inheritance_edges.extend(inheritance)
+
+        # Extract JPA entity relation fields
+        entity_rels = _extract_entity_relations(
+            class_node, source_bytes, class_id, fqn,
+            repo_id, import_map or {}, annotations,
+        )
+        result.entity_relations.extend(entity_rels)
 
         # Find class body → process methods
         body_node = class_node.child_by_field_name("body")

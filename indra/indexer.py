@@ -144,6 +144,7 @@ def _parse_file(args: tuple) -> ParseResult:
     result.rest_calls = extract_result.rest_calls
     result.impl_map = extract_result.impl_map
     result.inheritance_edges = extract_result.inheritance_edges
+    result.entity_relations = extract_result.entity_relations
 
     return result
 
@@ -191,6 +192,10 @@ def _delete_repo_data(conn: kuzu.Connection, repo_id: str) -> None:
     conn.execute(
         "MATCH (a:Class)-[r:IMPLEMENTS]->(b:Class) WHERE a.repo_id = $rid DELETE r", rid
     )
+
+    # Entity relation edges and nodes
+    conn.execute("MATCH (c:Class)-[r:HAS_RELATION]->(e:EntityRelation) WHERE c.repo_id = $rid DELETE r", rid)
+    conn.execute("MATCH (n:EntityRelation) WHERE n.repo_id = $rid DELETE n", rid)
 
     # --- node tables ---
     conn.execute("MATCH (n:RestCall) WHERE n.repo_id = $rid DELETE n", rid)
@@ -275,6 +280,7 @@ def index_repo(
         "rest_calls": 0,
         "call_edges": 0,
         "inheritance_edges": 0,
+        "entity_relations": 0,
     }
 
     work_items_base: list[tuple[str, str, str, str]] = []
@@ -396,6 +402,19 @@ def index_repo(
             )
             counters["rest_calls"] += 1
 
+        # Insert EntityRelation nodes
+        for er in pr.entity_relations:
+            conn.execute(
+                "CREATE (:EntityRelation {"
+                "id: $id, source_class_id: $source_class_id, "
+                "target_class_fqn: $target_class_fqn, field_name: $field_name, "
+                "relation_type: $relation_type, fetch_type: $fetch_type, "
+                "repo_id: $repo_id"
+                "})",
+                er,
+            )
+            counters["entity_relations"] += 1
+
     # FQN → class_id for inheritance edge resolution (built after all Class nodes written)
     fqn_to_class_id: dict[str, str] = {}
     for pr in parse_results.values():
@@ -407,6 +426,10 @@ def index_repo(
     # -----------------------------------------------------------------------
     fqn_index = build_fqn_index(all_methods)
     method_id_set: set[str] = {m["id"] for m in all_methods}
+
+    # Repo-level accumulator for all written CALLS pairs — used by Phase 6 to
+    # avoid re-inserting duplicate edges during virtual dispatch fan-out.
+    written_call_pairs: set[tuple[str, str]] = set()
 
     for file_id, pr in parse_results.items():
         if not pr.methods and not pr.src_bytes:
@@ -428,15 +451,14 @@ def index_repo(
             impl_index=impl_index,   # NEW — redirect UNRESOLVED calls to impl classes
         )
 
-        seen_edges: set[tuple[str, str]] = set()
         for edge in edges:
             if edge.edge_type == "CALLS":
                 if edge.callee_id not in method_id_set:
                     continue
                 pair = (edge.caller_id, edge.callee_id)
-                if pair in seen_edges:
+                if pair in written_call_pairs:
                     continue
-                seen_edges.add(pair)
+                written_call_pairs.add(pair)
                 conn.execute(
                     "MATCH (a:Method), (b:Method) "
                     "WHERE a.id = $caller AND b.id = $callee "
@@ -500,6 +522,16 @@ def index_repo(
                 {"rid": repo_id, "eid": ep["id"]},
             )
 
+    # HAS_RELATION edges (Class → EntityRelation)
+    for file_id, pr in parse_results.items():
+        for er in pr.entity_relations:
+            conn.execute(
+                "MATCH (c:Class), (e:EntityRelation) "
+                "WHERE c.id = $cid AND e.id = $eid "
+                "CREATE (c)-[:HAS_RELATION]->(e)",
+                {"cid": er["source_class_id"], "eid": er["id"]},
+            )
+
     # -----------------------------------------------------------------------
     # Phase 5 — Inheritance edges
     # -----------------------------------------------------------------------
@@ -527,5 +559,63 @@ def index_repo(
                     {"cid": child_id, "pid": parent_id},
                 )
             counters["inheritance_edges"] += 1
+
+    # -----------------------------------------------------------------------
+    # Phase 6 — Virtual dispatch fan-out (depends on Phase 5 EXTENDS/IMPLEMENTS edges)
+    # -----------------------------------------------------------------------
+    # Build override_index: abstract_method_fqn → [concrete_override_method_ids]
+    # For every concrete class C that IMPLEMENTS or EXTENDS an abstract class/interface A:
+    #   for each method M in A that has an override in C (same name),
+    #     add C's method to override_index[M.fqn]
+
+    override_index: dict[str, list[str]] = {}
+
+    # Build a class_id → methods map for fast lookup
+    class_methods: dict[str, list[dict]] = {}
+    for m in all_methods:
+        class_methods.setdefault(m["class_id"], []).append(m)
+
+    # Walk inheritance: for each (child_class_id, parent_fqn, edge_type) triple
+    # recorded in seen_inheritance, find methods in parent that have a same-named
+    # method in child and populate override_index.
+    for (child_id, parent_fqn, _edge_type) in seen_inheritance:
+        parent_id = fqn_to_class_id.get(parent_fqn)
+        if parent_id is None:
+            continue
+        parent_methods = class_methods.get(parent_id, [])
+        child_methods = class_methods.get(child_id, [])
+        child_method_names: dict[str, str] = {m["name"]: m["id"] for m in child_methods}
+        for pm in parent_methods:
+            if pm["name"] in child_method_names:
+                override_index.setdefault(pm["fqn"], []).append(child_method_names[pm["name"]])
+
+    # Write additional CALLS edges for overrides:
+    # For every existing CALLS edge (A→B) where B.fqn is in override_index,
+    # add CALLS edges (A→B1), (A→B2), etc. for each concrete override.
+    r_calls = conn.execute(
+        "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id, b.fqn",
+        {"rid": repo_id},
+    )
+    fan_out_edges: list[tuple[str, str]] = []
+    while r_calls.has_next():
+        caller_id, callee_id, callee_fqn = r_calls.get_next()
+        overrides = override_index.get(callee_fqn, [])
+        for override_id in overrides:
+            if override_id != callee_id and override_id in method_id_set:
+                fan_out_edges.append((caller_id, override_id))
+
+    seen_fanout: set[tuple[str, str]] = set()
+    for caller_id, callee_id in fan_out_edges:
+        pair = (caller_id, callee_id)
+        if pair in written_call_pairs or pair in seen_fanout:
+            continue
+        seen_fanout.add(pair)
+        conn.execute(
+            "MATCH (a:Method), (b:Method) "
+            "WHERE a.id = $caller AND b.id = $callee "
+            "CREATE (a)-[:CALLS]->(b)",
+            {"caller": caller_id, "callee": callee_id},
+        )
+        counters["call_edges"] += 1
 
     return counters

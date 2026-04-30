@@ -645,6 +645,76 @@ def find_superclasses(class_fqn: str, max_depth: int = 10) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Tool 14: list_entity_relations
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_entity_relations(repo_name: str) -> list[dict]:
+    """List all JPA entity relationships in a repo.
+
+    Returns list of dicts: source_class_fqn, field_name, relation_type,
+    fetch_type, target_class_fqn.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        result = conn.execute(
+            "MATCH (r:Repo) WHERE r.name = $repo_name RETURN r.id",
+            {"repo_name": repo_name},
+        )
+        if not result.has_next():
+            return []
+        repo_id = result.get_next()[0]
+
+        r = conn.execute(
+            "MATCH (c:Class)-[:HAS_RELATION]->(er:EntityRelation) "
+            "WHERE er.repo_id = $rid "
+            "RETURN c.fqn, er.field_name, er.relation_type, er.fetch_type, er.target_class_fqn",
+            {"rid": repo_id},
+        )
+        return _rows(r, ["source_class_fqn", "field_name", "relation_type", "fetch_type", "target_class_fqn"])
+    except Exception as exc:
+        log.error("list_entity_relations(%r): %s", repo_name, exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Tool 15: find_eager_fetches
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_eager_fetches(repo_name: str) -> list[dict]:
+    """Find all EAGER fetch relationships — potential N+1 query sources.
+
+    Returns list of dicts with source_class_fqn, field_name, relation_type,
+    target_class_fqn for all relations where fetch_type = 'EAGER'.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        result = conn.execute(
+            "MATCH (r:Repo) WHERE r.name = $repo_name RETURN r.id",
+            {"repo_name": repo_name},
+        )
+        if not result.has_next():
+            return []
+        repo_id = result.get_next()[0]
+
+        r = conn.execute(
+            "MATCH (c:Class)-[:HAS_RELATION]->(er:EntityRelation) "
+            "WHERE er.repo_id = $rid AND er.fetch_type = 'EAGER' "
+            "RETURN c.fqn, er.field_name, er.relation_type, er.target_class_fqn",
+            {"rid": repo_id},
+        )
+        return _rows(r, ["source_class_fqn", "field_name", "relation_type", "target_class_fqn"])
+    except Exception as exc:
+        log.error("find_eager_fetches(%r): %s", repo_name, exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Tool 11: index_repo_tool
 # ---------------------------------------------------------------------------
 

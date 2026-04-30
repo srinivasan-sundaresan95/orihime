@@ -32,3 +32,4 @@ class ParseResult:
     impl_map: dict[str, str] = field(default_factory=dict)
     # Inheritance edges: list of {"child_id": str, "parent_fqn": str, "edge_type": "EXTENDS"|"IMPLEMENTS"}
     inheritance_edges: list[dict] = field(default_factory=list)
+    entity_relations: list[dict] = field(default_factory=list)

@@ -484,11 +484,17 @@ class _DB:
 
         # ── Classes & interfaces ──────────────────────────────────────────
         r = self._conn.execute(
-            "MATCH (c:Class) WHERE c.repo_id = $rid RETURN c.id, c.name, c.fqn, c.is_interface",
+            "MATCH (f:File)-[:CONTAINS_CLASS]->(c:Class) WHERE c.repo_id = $rid "
+            "RETURN c.id, c.name, c.fqn, c.is_interface, f.path",
             {"rid": repo_id},
         )
-        class_rows = self._rows(r, ["id", "name", "fqn", "is_interface"])
+        class_rows = self._rows(r, ["id", "name", "fqn", "is_interface", "file_path"])
         class_ids = {row["id"] for row in class_rows}
+
+        def _is_test_path(path: str) -> bool:
+            p = (path or "").replace("\\", "/").lower()
+            # Match only actual test *directories* — never class names
+            return "/test/" in p or "/tests/" in p or "/androidtest/" in p
 
         # ── Class-to-class call edges (aggregated) ────────────────────────
         r2 = self._conn.execute(
@@ -505,22 +511,17 @@ class _DB:
                 class_degree[e["from"]] = class_degree.get(e["from"], 0) + e["weight"]
                 edges.append({"from": e["from"], "to": e["to"], "weight": e["weight"], "etype": "class_call"})
 
-        for row in class_rows:
-            nodes.append({
-                "id": row["id"],
-                "label": row["name"],
-                "fqn": row["fqn"],
-                "kind": "interface" if row["is_interface"] else "class",
-                "degree": class_degree.get(row["id"], 0),
-            })
+        # Class nodes built AFTER inheritance block so degree includes inheritance edges
+        _class_rows_pending = class_rows
 
         # ── Methods ───────────────────────────────────────────────────────
         r3 = self._conn.execute(
-            "MATCH (c:Class)-[:CONTAINS_METHOD]->(m:Method) WHERE c.repo_id = $rid "
-            "RETURN m.id, m.name, m.fqn, c.id AS class_id, m.generated",
+            "MATCH (f:File)-[:CONTAINS_CLASS]->(c:Class)-[:CONTAINS_METHOD]->(m:Method) "
+            "WHERE c.repo_id = $rid "
+            "RETURN m.id, m.name, m.fqn, c.id AS class_id, m.generated, f.path",
             {"rid": repo_id},
         )
-        method_rows = self._rows(r3, ["id", "name", "fqn", "class_id", "generated"])
+        method_rows = self._rows(r3, ["id", "name", "fqn", "class_id", "generated", "file_path"])
         method_ids = {row["id"] for row in method_rows}
         method_degree: dict[str, int] = {}
 
@@ -553,6 +554,7 @@ class _DB:
                 "parent_id": row["class_id"],
                 "group": _class_label(row["fqn"]),
                 "generated": bool(row.get("generated", False)),
+                "is_test": _is_test_path(row.get("file_path", "")),
             })
 
         # ── External dependency stubs (UNRESOLVED_CALL) ───────────────────
@@ -582,7 +584,8 @@ class _DB:
 
         nodes.extend(ext_nodes.values())
 
-        # Inheritance edges
+        # Inheritance edges — also accumulate into class_degree so interfaces
+        # with only IMPLEMENTS connections aren't treated as isolated by the layout
         try:
             r6 = self._conn.execute(
                 "MATCH (child:Class)-[:EXTENDS]->(parent:Class) WHERE child.repo_id = $rid RETURN child.id, parent.id",
@@ -590,6 +593,8 @@ class _DB:
             )
             while r6.has_next():
                 a, b = r6.get_next()
+                class_degree[a] = class_degree.get(a, 0) + 1
+                class_degree[b] = class_degree.get(b, 0) + 1
                 edges.append({"from": a, "to": b, "weight": 1, "etype": "extends"})
             r7 = self._conn.execute(
                 "MATCH (child:Class)-[:IMPLEMENTS]->(parent:Class) WHERE child.repo_id = $rid RETURN child.id, parent.id",
@@ -597,9 +602,38 @@ class _DB:
             )
             while r7.has_next():
                 a, b = r7.get_next()
+                class_degree[a] = class_degree.get(a, 0) + 1
+                class_degree[b] = class_degree.get(b, 0) + 1
                 edges.append({"from": a, "to": b, "weight": 1, "etype": "implements"})
         except Exception:
             pass  # old DB without inheritance tables — degrade gracefully
+
+        # Build class nodes now — after inheritance degree is accumulated
+        for row in _class_rows_pending:
+            nodes.append({
+                "id": row["id"],
+                "label": row["name"],
+                "fqn": row["fqn"],
+                "kind": "interface" if row["is_interface"] else "class",
+                "degree": class_degree.get(row["id"], 0),
+                "is_test": _is_test_path(row.get("file_path", "")),
+            })
+
+        # Entity relation edges (Class → Class, via EntityRelation node — show as direct edge)
+        try:
+            r8 = self._conn.execute(
+                "MATCH (c:Class)-[:HAS_RELATION]->(er:EntityRelation) WHERE er.repo_id = $rid "
+                "MATCH (t:Class) WHERE t.fqn = er.target_class_fqn "
+                "RETURN c.id, t.id, er.relation_type, er.fetch_type",
+                {"rid": repo_id},
+            )
+            while r8.has_next():
+                src_id, tgt_id, rel_type, fetch_type = r8.get_next()
+                edges.append({"from": src_id, "to": tgt_id, "weight": 1,
+                              "etype": "jpa_" + rel_type.lower(),
+                              "fetch_type": fetch_type})
+        except Exception:
+            pass
 
         return {"nodes": nodes, "edges": edges}
 
@@ -790,6 +824,7 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
     <button class="view-btn"        data-view="classes"    style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Classes</button>
     <button class="view-btn"        data-view="methods"    style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Methods</button>
     <button class="view-btn"        data-view="deps"       style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Dependencies</button>
+    <button class="view-btn"        data-view="entities"   style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Entities</button>
   </div>
 
   <!-- Per-kind filter toggles — auto-populated after load, start all ON -->
@@ -845,6 +880,8 @@ let rawData   = null;           // full payload from server
 let hiddenKinds = new Set();    // kinds toggled OFF by the user
 let hiddenEdgeTypes = new Set();
 let showGenerated = false;
+let showTests = false;
+let showOrphans = false;
 
 // ── Colour palette ────────────────────────────────────────────────────────
 const KIND_COLOR = {{
@@ -865,10 +902,11 @@ function groupColor(g) {{
 
 // ── View presets ──────────────────────────────────────────────────────────
 const PRESET_KINDS = {{
-  all:     null,                              // null = show everything
-  classes: new Set(['class','interface','external']),
-  methods: new Set(['method']),
-  deps:    new Set(['class','interface','external']),
+  all:      null,                              // null = show everything
+  classes:  new Set(['class','interface','external']),
+  methods:  new Set(['method']),
+  deps:     new Set(['class','interface','external']),
+  entities: new Set(['class', 'interface']),
 }};
 
 document.querySelectorAll('.view-btn').forEach(btn => {{
@@ -905,7 +943,9 @@ function applyVisibility() {{
     const n = visNodes.get(id);
     const hiddenByKind      = hiddenKinds.has(n.kind);
     const hiddenByGenerated = (n.generated === true && !showGenerated);
-    return {{ id, hidden: hiddenByKind || hiddenByGenerated }};
+    const hiddenByTest      = (n.is_test === true && !showTests);
+    const hiddenByOrphan    = (n.degree === 0 && !showOrphans && n.kind !== 'external');
+    return {{ id, hidden: hiddenByKind || hiddenByGenerated || hiddenByTest || hiddenByOrphan }};
   }});
   visNodes.update(nodeUpdates);
 
@@ -974,6 +1014,72 @@ function buildFilterToggles(kinds) {{
     }};
     panel.appendChild(genBtn);
   }}
+
+  // Tests toggle (hidden by default)
+  const hasTestNodes = rawData && rawData.nodes.some(n => n.is_test === true);
+  if (hasTestNodes) {{
+    const testBtn = document.createElement('button');
+    testBtn.id             = 'testsToggle';
+    testBtn.textContent    = 'Tests';
+    testBtn.dataset.active = '0';
+    testBtn.style.cssText  = 'padding:4px 10px;font-size:0.78rem;border-radius:6px;'
+      + 'border:1px dashed #475569;background:transparent;color:#475569;cursor:pointer;font-weight:600;opacity:0.35;';
+    testBtn.onclick = () => {{
+      showTests = testBtn.dataset.active !== '1';
+      testBtn.dataset.active   = showTests ? '1' : '0';
+      testBtn.style.opacity    = showTests ? '1' : '0.35';
+      testBtn.style.borderColor = showTests ? '#22d3ee' : '#475569';
+      testBtn.style.color       = showTests ? '#22d3ee' : '#475569';
+      applyVisibility();
+    }};
+    panel.appendChild(testBtn);
+  }}
+
+  // Orphans toggle (hidden by default)
+  const hasOrphans = rawData && rawData.nodes.some(n => n.degree === 0 && n.kind !== 'external');
+  if (hasOrphans) {{
+    const orphanBtn = document.createElement('button');
+    orphanBtn.id             = 'orphansToggle';
+    orphanBtn.textContent    = 'Orphans';
+    orphanBtn.dataset.active = '0';
+    orphanBtn.style.cssText  = 'padding:4px 10px;font-size:0.78rem;border-radius:6px;'
+      + 'border:1px dashed #475569;background:transparent;color:#475569;cursor:pointer;font-weight:600;opacity:0.35;';
+    orphanBtn.onclick = () => {{
+      showOrphans = orphanBtn.dataset.active !== '1';
+      orphanBtn.dataset.active    = showOrphans ? '1' : '0';
+      orphanBtn.style.opacity     = showOrphans ? '1' : '0.35';
+      orphanBtn.style.borderColor = showOrphans ? '#94a3b8' : '#475569';
+      orphanBtn.style.color       = showOrphans ? '#94a3b8' : '#475569';
+      applyVisibility();
+    }};
+    panel.appendChild(orphanBtn);
+  }}
+
+  // Entity Relations toggle
+  const hasJpaEdges = rawData && rawData.edges.some(e => e.etype && e.etype.startsWith('jpa_'));
+  if (hasJpaEdges) {{
+    const jpaBtn = document.createElement('button');
+    jpaBtn.id             = 'entityRelationsToggle';
+    jpaBtn.textContent    = 'Entity Relations';
+    jpaBtn.dataset.active = '1';
+    jpaBtn.style.cssText  = 'padding:4px 10px;font-size:0.78rem;border-radius:6px;'
+      + 'border:1px solid #b45309;background:transparent;color:#b45309;cursor:pointer;font-weight:600;opacity:1;';
+    jpaBtn.onclick = () => {{
+      const on = jpaBtn.dataset.active === '1';
+      const jpaEtypes = ['jpa_onetomany','jpa_manytoone','jpa_onetoone','jpa_manytomany'];
+      if (on) {{
+        jpaEtypes.forEach(t => hiddenEdgeTypes.add(t));
+        jpaBtn.style.opacity  = '0.35';
+        jpaBtn.dataset.active = '0';
+      }} else {{
+        jpaEtypes.forEach(t => hiddenEdgeTypes.delete(t));
+        jpaBtn.style.opacity  = '1';
+        jpaBtn.dataset.active = '1';
+      }}
+      applyVisibility();
+    }};
+    panel.appendChild(jpaBtn);
+  }}
 }}
 
 function buildLegend(nodes) {{
@@ -997,6 +1103,7 @@ function nodeVisual(n) {{
   const col  = KIND_COLOR[kind] || KIND_COLOR.class;
   const isExt = kind === 'external';
   const isGenerated = kind === 'method' && n.generated === true;
+  const isTest = n.is_test === true;
   const size  = isExt ? 10 : isGenerated ? 6 : Math.max(10, Math.min(32, 10 + (n.degree || 0)));
   return {{
     id:    n.id,
@@ -1004,14 +1111,16 @@ function nodeVisual(n) {{
     fqn:   n.fqn,
     kind,
     generated: n.generated || false,
+    is_test:   isTest,
     shape: kind === 'interface' ? 'diamond' : (isExt ? 'square' : 'dot'),
     size,
-    color: {{ background: col.bg, border: col.border,
+    color: {{ background: isTest ? '#0f2231' : col.bg,
+              border:     isTest ? '#22d3ee' : col.border,
               highlight: {{ background: '#fff', border: '#6366f1' }},
               hover:     {{ background: col.border, border: '#fff' }} }},
-    font:   {{ color: isGenerated ? '#64748b' : (isExt ? '#94a3b8' : '#f1f5f9'), size: isExt ? 9 : 11 }},
+    font:   {{ color: isTest ? '#334155' : isGenerated ? '#64748b' : (isExt ? '#94a3b8' : '#f1f5f9'), size: isExt ? 9 : 11 }},
     opacity: isGenerated ? 0.4 : 1.0,
-    hidden: hiddenKinds.has(kind) || (isGenerated && !showGenerated),
+    hidden: hiddenKinds.has(kind) || (isGenerated && !showGenerated) || (isTest && !showTests) || (n.degree === 0 && !showOrphans && kind !== 'external'),
     group:  n.group || '',
   }};
 }}
@@ -1019,10 +1128,14 @@ function nodeVisual(n) {{
 function edgeVisual(e, idx) {{
   const w = e.weight || 1;
   // Differentiate edge types visually
-  const edgeColor = e.etype === 'method_call' ? '#374151'
-                  : e.etype === 'ext_call'    ? '#4c0519'
-                  : e.etype === 'extends'     ? '#7c3aed'
-                  : e.etype === 'implements'  ? '#0369a1'
+  const edgeColor = e.etype === 'method_call'     ? '#374151'
+                  : e.etype === 'ext_call'         ? '#4c0519'
+                  : e.etype === 'extends'           ? '#7c3aed'
+                  : e.etype === 'implements'        ? '#0369a1'
+                  : e.etype === 'jpa_onetomany'    ? '#b45309'
+                  : e.etype === 'jpa_manytoone'    ? '#d97706'
+                  : e.etype === 'jpa_onetoone'     ? '#f59e0b'
+                  : e.etype === 'jpa_manytomany'   ? '#fbbf24'
                   : '#2d3148';
   const isDashed = e.etype === 'extends' || e.etype === 'implements';
   return {{
@@ -1052,6 +1165,8 @@ function loadGraph() {{
   hiddenKinds.clear();
   hiddenEdgeTypes.clear();
   showGenerated = false;
+  showTests = false;
+  showOrphans = false;
   rawData = null;
 
   fetch(`/api/graph?repo=${{encodeURIComponent(repo)}}`)
