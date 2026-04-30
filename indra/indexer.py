@@ -433,12 +433,14 @@ def index_repo(
                 conn.execute(
                     "CREATE (:RestCall {"
                     "id: $id, http_method: $http_method, url_pattern: $url_pattern, "
+                    "callee_name: $callee_name, "
                     "caller_method_id: $caller_method_id, repo_id: $repo_id"
                     "})",
                     {
                         "id": edge.callee_id,
                         "http_method": "UNKNOWN",
                         "url_pattern": "UNRESOLVED",
+                        "callee_name": edge.callee_name,
                         "caller_method_id": edge.caller_id,
                         "repo_id": repo_id,
                     },

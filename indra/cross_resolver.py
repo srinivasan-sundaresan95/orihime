@@ -10,11 +10,31 @@ load_indexed_repos(conn) -> list[str]
 """
 from __future__ import annotations
 
+import re as _re
 import sys
 
 import kuzu
 
 from indra.path_utils import compile_path_regex, match_url_pattern
+
+_SCHEME_HOST_RE = _re.compile(r'^https?://[^/]+')
+
+
+def _strip_scheme_host(url: str) -> str:
+    """Remove scheme and host from a URL, returning just the path (and query).
+
+    Examples
+    --------
+    >>> _strip_scheme_host("http://svc/wallet/balance")
+    '/wallet/balance'
+    >>> _strip_scheme_host("https://internal-svc.example.com/api/v1/items")
+    '/api/v1/items'
+    >>> _strip_scheme_host("/wallet/balance")
+    '/wallet/balance'
+    >>> _strip_scheme_host("http://svc")
+    ''
+    """
+    return _SCHEME_HOST_RE.sub('', url)
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +134,14 @@ def run_cross_resolution(conn: kuzu.Connection) -> dict:
             unresolved += 1
             continue
 
+        # Strip scheme+host from the url_pattern so that full URLs like
+        # "http://svc/wallet/balance" match anchored regexes like
+        # ^/wallet/balance$.  Do NOT mutate rc["url_pattern"].
+        url_to_match = _strip_scheme_host(rc["url_pattern"])
+        if not url_to_match:
+            unresolved += 1
+            continue
+
         found_match = False
         for ep in endpoints:
             # HTTP method must match (case-insensitive); both sides already uppercased
@@ -122,7 +150,7 @@ def run_cross_resolution(conn: kuzu.Connection) -> dict:
                     continue
 
             # URL pattern must match endpoint path regex
-            if not match_url_pattern(rc["url_pattern"], ep["path_regex"]):
+            if not match_url_pattern(url_to_match, ep["path_regex"]):
                 continue
 
             found_match = True

@@ -499,7 +499,7 @@ def list_unresolved_calls(repo_name: str = "") -> list[dict]:
 
     Returns:
         List of dicts with keys ``url_pattern``, ``http_method``,
-        ``caller_fqn``, and ``repo_name``.
+        ``callee_name``, ``caller_fqn``, and ``repo_name``.
     """
     conn = _get_connection()
     if conn is None:
@@ -510,6 +510,7 @@ def list_unresolved_calls(repo_name: str = "") -> list[dict]:
                 "MATCH (caller:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
                 "MATCH (r:Repo) WHERE r.id = rc.repo_id AND r.name = $repo_name "
                 "RETURN rc.url_pattern AS url_pattern, rc.http_method AS http_method, "
+                "       rc.callee_name AS callee_name, "
                 "       caller.fqn AS caller_fqn, r.name AS repo_name",
                 {"repo_name": repo_name},
             )
@@ -518,9 +519,10 @@ def list_unresolved_calls(repo_name: str = "") -> list[dict]:
                 "MATCH (caller:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
                 "MATCH (r:Repo) WHERE r.id = rc.repo_id "
                 "RETURN rc.url_pattern AS url_pattern, rc.http_method AS http_method, "
+                "       rc.callee_name AS callee_name, "
                 "       caller.fqn AS caller_fqn, r.name AS repo_name",
             )
-        return _rows(result, ["url_pattern", "http_method", "caller_fqn", "repo_name"])
+        return _rows(result, ["url_pattern", "http_method", "callee_name", "caller_fqn", "repo_name"])
     except Exception as exc:
         log.error("list_unresolved_calls(%r): %s", repo_name, exc)
         return [{"error": str(exc)}]

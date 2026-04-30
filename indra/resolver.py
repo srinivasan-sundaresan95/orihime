@@ -15,6 +15,7 @@ class CallEdge:
     caller_id: str   # Method.id of the calling method
     callee_id: str   # Method.id (CALLS) or new uuid (UNRESOLVED_CALL)
     edge_type: str   # "CALLS" or "UNRESOLVED_CALL"
+    callee_name: str = ""  # Simple method name at the call site
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +254,27 @@ def _get_invocation_name(inv_node, source_bytes: bytes) -> str | None:
     return None
 
 
+def _is_object_style_call(inv_node, source_bytes: bytes) -> bool:
+    """Return True when the call is a qualified call with a type-like receiver.
+
+    Heuristic: the call_expression contains a ``navigation_expression`` whose
+    first identifier child starts with an uppercase letter.  This covers Kotlin
+    ``object`` declarations, companion objects and Java-style static helpers
+    (e.g. ``DateTimeUtil.isInTimePeriod(42)``).  Such calls are statically
+    dispatched and cannot be DI-injected, so the impl_index restriction should
+    not apply to them.
+    """
+    for child in inv_node.children:
+        if child.type == "navigation_expression":
+            # The receiver is the first identifier-like child
+            for sub in child.children:
+                if sub.type in ("identifier", "simple_identifier"):
+                    text = _text(sub, source_bytes)
+                    return bool(text) and text[0].isupper()
+            break
+    return False
+
+
 def _process_invocation(
     inv_node,
     source_bytes: bytes,
@@ -271,8 +293,12 @@ def _process_invocation(
     # Suffix matches are restricted to local methods when impl_index is active
     # to prevent accidental wiring to unregistered impl classes; cross-file
     # resolution goes exclusively through the impl_index gate.
+    #
+    # Exception: Kotlin object/companion/static calls use a capitalised receiver
+    # (e.g. ``DateTimeUtil.isInTimePeriod()``).  These are statically dispatched
+    # and cannot be DI-injected, so we allow cross-file suffix matches for them.
     raw_matches = suffix_index.get(name, [])
-    if impl_index is not None:
+    if impl_index is not None and not _is_object_style_call(inv_node, source_bytes):
         matches = [mid for mid in raw_matches if mid in local_method_ids]
     else:
         matches = raw_matches
@@ -298,4 +324,4 @@ def _process_invocation(
         callee_id = str(uuid.uuid4())
         edge_type = "UNRESOLVED_CALL"
 
-    edges.append(CallEdge(caller_id=caller_id, callee_id=callee_id, edge_type=edge_type))
+    edges.append(CallEdge(caller_id=caller_id, callee_id=callee_id, edge_type=edge_type, callee_name=name))

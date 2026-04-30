@@ -53,6 +53,7 @@ _NODE_TABLES = [
         id STRING,
         http_method STRING,
         url_pattern STRING,
+        callee_name STRING,
         caller_method_id STRING,
         repo_id STRING,
         PRIMARY KEY(id)

@@ -67,6 +67,25 @@ _WALLET_CLIENT_JAVA = textwrap.dedent("""\
     }
 """)
 
+# service-a-fullurl: same as service-a but uses a full URL (scheme + host + path)
+# to exercise the _strip_scheme_host fix in run_cross_resolution.
+_WALLET_CLIENT_FULLURL_JAVA = textwrap.dedent("""\
+    package com.example.serviceafullurl;
+
+    import org.springframework.web.client.RestTemplate;
+    import org.springframework.stereotype.Component;
+
+    @Component
+    public class WalletClientFullUrl {
+
+        private final RestTemplate restTemplate = new RestTemplate();
+
+        public String getBalance() {
+            return restTemplate.getForObject("http://wallet-svc/wallet/balance", String.class);
+        }
+    }
+""")
+
 
 # ---------------------------------------------------------------------------
 # Module-scoped fixture: create two temp repos, index both, run resolution
@@ -201,4 +220,90 @@ def test_cross_e2e_indexed_rest_call_in_service_a(cross_e2e):
     conn, _, stats_a, _ = cross_e2e
     assert stats_a["rest_calls"] >= 1, (
         f"Expected >= 1 rest_call indexed in service-a, got {stats_a['rest_calls']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Full-URL caller fixture + test (P4-4)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def cross_e2e_fullurl():
+    """Index service-a-fullurl (uses full URL) and service-b into a shared DB,
+    run cross resolution, and yield the connection + stats.
+
+    This fixture verifies the _strip_scheme_host fix: a RestCall whose
+    url_pattern is "http://wallet-svc/wallet/balance" must still match the
+    Endpoint at "/wallet/balance" after the scheme+host prefix is stripped.
+    """
+    from indra.indexer import index_repo
+
+    with tempfile.TemporaryDirectory() as repo_a_dir:
+        with tempfile.TemporaryDirectory() as repo_b_dir:
+            with tempfile.TemporaryDirectory() as db_dir:
+
+                # Write inline Java source files
+                with open(os.path.join(repo_b_dir, "WalletController.java"), "w") as f:
+                    f.write(_WALLET_CONTROLLER_JAVA)
+
+                with open(os.path.join(repo_a_dir, "WalletClientFullUrl.java"), "w") as f:
+                    f.write(_WALLET_CLIENT_FULLURL_JAVA)
+
+                db_path = os.path.join(db_dir, "cross_e2e_fullurl.db")
+
+                stats_b = index_repo(
+                    repo_path=repo_b_dir,
+                    repo_name="service-b-fu",
+                    db_path=db_path,
+                    max_workers=1,
+                )
+                print(f"\n[cross-e2e-fullurl] service-b-fu index stats: {stats_b}")
+
+                stats_a = index_repo(
+                    repo_path=repo_a_dir,
+                    repo_name="service-a-fullurl",
+                    db_path=db_path,
+                    max_workers=1,
+                )
+                print(f"[cross-e2e-fullurl] service-a-fullurl index stats: {stats_a}")
+
+                db = kuzu.Database(db_path)
+                conn = kuzu.Connection(db)
+
+                resolution_stats = run_cross_resolution(conn)
+                print(f"[cross-e2e-fullurl] resolution stats: {resolution_stats}")
+
+                yield conn, resolution_stats, stats_a, stats_b
+
+                del conn, db
+
+
+@pytest.mark.integration
+def test_cross_e2e_fullurl_creates_calls_rest_edge(cross_e2e_fullurl):
+    """A caller that uses a full URL (http://wallet-svc/wallet/balance) must
+    still produce a CALLS_REST edge after scheme+host stripping."""
+    conn, stats, stats_a, _ = cross_e2e_fullurl
+
+    repo_a_result = conn.execute(
+        "MATCH (r:Repo {name: 'service-a-fullurl'}) RETURN r.id"
+    )
+    repo_a_id = repo_a_result.get_next()[0]
+
+    repo_b_result = conn.execute(
+        "MATCH (r:Repo {name: 'service-b-fu'}) RETURN r.id"
+    )
+    repo_b_id = repo_b_result.get_next()[0]
+
+    edge_result = conn.execute(
+        "MATCH (m:Method)-[:CALLS_REST]->(e:Endpoint) "
+        "WHERE m.repo_id = $ra AND e.repo_id = $rb "
+        "RETURN count(*)",
+        {"ra": repo_a_id, "rb": repo_b_id},
+    )
+    edge_count = edge_result.get_next()[0]
+
+    assert edge_count >= 1, (
+        f"Expected >= 1 CALLS_REST edge from service-a-fullurl to service-b-fu "
+        f"(full URL caller); got {edge_count}. "
+        f"resolution stats={stats}, service-a stats={stats_a}"
     )
