@@ -95,15 +95,17 @@ Add a dedicated tab in the web UI showing findings from S4–S8 and G7–G8 in a
 
 ---
 
-### G5 — Batch DB Writes (~25h)
+### G5 — Batch DB Writes + Server Mode (~45h)
 
-**Problem**: KuzuDB's single-writer constraint means Phase 2 (all INSERTs) is fully serial — one CREATE per node. For repos >500 files this is the indexing bottleneck.
+**Problem**: KuzuDB's single-writer constraint means Phase 2 (all INSERTs) is fully serial — one CREATE per node. For repos >500 files this is the indexing bottleneck. On a shared bare metal server it also means "UI running + CI re-indexing simultaneously" crashes one of them.
 
-**Fix (Option A — batch INSERT, recommended first)**: Buffer all nodes from all ParseResults in memory, then write per table using KuzuDB's multi-row COPY FROM syntax. Expected 5–10× write speedup with no architecture change, ~20h.
+**Fix A — Batch INSERT (~20h, do first)**: Buffer all nodes from all ParseResults in memory, then write per table using KuzuDB's multi-row `COPY FROM` syntax. Expected 5–10× write speedup with no architecture change.
 
-**Fix (Option B — WAL staging, if A isn't enough)**: Write Phase 2 results to an Arrow/Parquet file first (in-memory, near-instant), then bulk-load into KuzuDB in one pass. Fully decouples parse speed from DB write speed, ~40h total.
+**Fix B — WAL staging (~25h additional, if A isn't enough)**: Write Phase 2 results to an Arrow/Parquet file first (in-memory, near-instant), then bulk-load into KuzuDB in one pass. Fully decouples parse speed from DB write speed.
 
-**Note on multi-repo bare metal hosting**: KuzuDB is an embedded database (like SQLite). For a single bare metal server serving a team, the right wrapper is a thin FastAPI serialization layer that owns the KuzuDB connection singleton, queues writes, and exposes HTTP endpoints for index + query. This unblocks the "UI running + CI re-indexing simultaneously crashes" problem without migrating the DB engine. See G9 for the longer-term option.
+**Fix C — Write-serialization server (~20h, for bare metal multi-repo)**: A thin FastAPI process that owns the KuzuDB connection singleton, serializes all writes via an asyncio queue, and exposes the same HTTP endpoints the UI and MCP server already use. Developers running locally open KuzuDB directly as today — they are completely unaware of this layer. The server deployment runs via the FastAPI process instead. KuzuDB stays embedded; no new database engine.
+
+No alternative database engine is worth considering. FalkorDB (Redis module) and Apache AGE (PostgreSQL extension) both require a separate server daemon — developers would need to run Redis or PostgreSQL before Indra works. KuzuDB's embedded model is the reason the developer experience is frictionless and must be preserved.
 
 ---
 
@@ -142,22 +144,12 @@ MCP tool: `find_license_violations(repo_name, allowed=["MIT","Apache-2.0","BSD-2
 
 ---
 
-### G9 — FalkorDB Migration for Multi-User Server (~60h)
-
-**When to do this**: When the bare metal server serves >3 concurrent users or >10 repos and Option A of G5 is no longer sufficient.
-
-FalkorDB (MIT licence, Redis module) speaks openCypher — the same query language as KuzuDB. It runs as a proper server process, supports concurrent reads, has Redis AUTH, and scales to tens of millions of nodes. The Cypher queries in Indra are ~95% compatible.
-
-Migration path: schema DDL rewrite + swap Python client (`falkordb` vs `kuzu`). The incremental re-index (v1.1-A), branch mode (v1.1-B), and all MCP tools continue working unchanged.
-
-Apache AGE on PostgreSQL is an alternative if you're already running PG infrastructure, but the query translation is more complex.
-
----
 
 ## Not Worth Building in Indra
 
 | Capability | Reason |
 |---|---|
+| FalkorDB / Apache AGE / any server DB | All require a separate daemon process (Redis or PostgreSQL); developers would need to run infrastructure before Indra works. KuzuDB's embedded model is non-negotiable for frictionless local use. G5 Fix C solves the multi-user server case without leaving KuzuDB. |
 | Hardcoded secrets detection (S9) | Detekt secrets plugin + SonarQube Community S6437 + GitHub push protection already cover this |
 | Dependency CVE standalone (S10) | Dependabot, SonarQube Community SCA, Snyk all do this; Indra's angle (reachability-aware CVE) is a follow-on to S8 + G9, not a standalone project |
 | IDE LSP integration (S12) | SonarLint + Detekt IntelliJ plugin already provide inline warnings; a fourth source causes alert fatigue; CI/CD is the better Indra integration point |
