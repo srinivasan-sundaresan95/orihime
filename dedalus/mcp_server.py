@@ -813,15 +813,15 @@ def find_cross_service_taint(repo_name: str, max_depth: int = 6) -> list[dict]:
             return []
 
         # 2. Build full in-repo CALLS adjacency list for BFS
-        #    method_id → list of callee_ids
+        #    method_id → list of (callee_id, callee_name) pairs
         r_calls = conn.execute(
-            "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id",
+            "MATCH (a:Method)-[c:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id, c.callee_name",
             {"rid": repo_id},
         )
-        adj: dict[str, list[str]] = {}
+        adj: dict[str, list[tuple[str, str]]] = {}
         while r_calls.has_next():
-            src, dst = r_calls.get_next()
-            adj.setdefault(src, []).append(dst)
+            src, dst, cname = r_calls.get_next()
+            adj.setdefault(src, []).append((dst, cname or ""))
 
         # 3. Collect all methods that issue outbound REST calls in this repo
         r_rc = conn.execute(
@@ -859,14 +859,16 @@ def find_cross_service_taint(repo_name: str, max_depth: int = 6) -> list[dict]:
             id_to_fqn[mid] = fqn
 
         # 5. BFS from each handler toward sinks
+        # path items are dicts: {method_id, callee_name (name used to reach this hop)}
         results: list[dict] = []
         seen_paths: set[tuple[str, str]] = set()  # (handler_id, sink_id)
 
         for handler_id, ep_http_method, ep_path in handlers:
             if handler_id not in id_to_fqn:
                 continue
-            # BFS
-            queue: deque[tuple[str, list[str]]] = deque([(handler_id, [handler_id])])
+            # BFS — each path item: {"mid": str, "callee_name": str}
+            start_hop = {"mid": handler_id, "callee_name": ""}
+            queue: deque[tuple[str, list[dict]]] = deque([(handler_id, [start_hop])])
             visited: set[str] = {handler_id}
             while queue:
                 current, path = queue.popleft()
@@ -877,6 +879,11 @@ def find_cross_service_taint(repo_name: str, max_depth: int = 6) -> list[dict]:
                     if key not in seen_paths:
                         seen_paths.add(key)
                         for url_pattern, sink_http_m in sink_calls[current]:
+                            call_chain = [
+                                {"fqn": id_to_fqn.get(hop["mid"], hop["mid"]),
+                                 "callee_name": hop["callee_name"]}
+                                for hop in path
+                            ]
                             results.append({
                                 "source_handler_fqn": id_to_fqn.get(handler_id, handler_id),
                                 "source_endpoint": f"{ep_http_method} {ep_path}",
@@ -884,17 +891,85 @@ def find_cross_service_taint(repo_name: str, max_depth: int = 6) -> list[dict]:
                                 "sink_url_pattern": url_pattern,
                                 "sink_http_method": sink_http_m,
                                 "path_length": len(path) - 1,
-                                "call_chain": [id_to_fqn.get(m, m) for m in path],
+                                "call_chain": call_chain,
                             })
-                for callee in adj.get(current, []):
-                    if callee not in visited:
-                        visited.add(callee)
-                        queue.append((callee, path + [callee]))
+                for callee_id, callee_name in adj.get(current, []):
+                    if callee_id not in visited:
+                        visited.add(callee_id)
+                        queue.append((callee_id, path + [{"mid": callee_id, "callee_name": callee_name}]))
 
         results.sort(key=lambda x: x["path_length"])
         return results
     except Exception as exc:
         log.error("find_cross_service_taint(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# G1 Tool: find_external_calls
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_external_calls(repo_name: str) -> list[dict]:
+    """Return all calls to methods NOT in the indexed repo (callee has no Method node).
+
+    These are calls to external libraries, frameworks, or unindexed services.
+    Returns [{caller_fqn, callee_name, call_count}] sorted by call_count descending.
+    Useful for: "what external dependencies does this service actually call at runtime?"
+
+    Args:
+        repo_name: The logical name of the indexed repository.
+
+    Returns:
+        List of dicts with keys ``caller_fqn``, ``callee_name``, ``call_count``.
+        Empty list if the repo is not found or has no external calls.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # Calls where the callee belongs to a different repo (cross-repo CALLS edges)
+        counts: dict[tuple[str, str], int] = {}
+
+        r_cross = conn.execute(
+            "MATCH (a:Method)-[c:CALLS]->(b:Method) "
+            "WHERE a.repo_id = $rid AND b.repo_id <> $rid "
+            "RETURN a.fqn, c.callee_name",
+            {"rid": repo_id},
+        )
+        while r_cross.has_next():
+            caller_fqn, callee_name = r_cross.get_next()
+            key = (caller_fqn, callee_name or "")
+            counts[key] = counts.get(key, 0) + 1
+
+        # UNRESOLVED_CALLs are calls to methods not indexed at all
+        r_unres = conn.execute(
+            "MATCH (a:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
+            "WHERE a.repo_id = $rid "
+            "RETURN a.fqn, rc.callee_name",
+            {"rid": repo_id},
+        )
+        while r_unres.has_next():
+            caller_fqn, callee_name = r_unres.get_next()
+            key = (caller_fqn, callee_name or "")
+            counts[key] = counts.get(key, 0) + 1
+
+        results = [
+            {"caller_fqn": caller_fqn, "callee_name": callee_name, "call_count": count}
+            for (caller_fqn, callee_name), count in counts.items()
+        ]
+        results.sort(key=lambda x: x["call_count"], reverse=True)
+        return results
+    except Exception as exc:
+        log.error("find_external_calls(%r): %s", repo_name, exc)
         return [{"error": str(exc)}]
 
 
@@ -1972,6 +2047,102 @@ def find_cascade_risk(repo_name: str) -> list[dict]:
     except Exception as exc:
         log.error("find_cascade_risk(%r): %s", repo_name, exc)
         return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# Security Tool S11: find_license_violations
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_license_violations(
+    repo_name: str,
+    allowed: list[str] | None = None,
+    license_overrides: dict[str, str] | None = None,
+) -> list[dict]:
+    """Check dependencies in the repo for license compliance.
+
+    Looks for pom.xml and build.gradle/build.gradle.kts in the repo root.
+    Queries Maven Central for each dependency's license.
+
+    Args:
+        repo_name: The logical name of the indexed repository.
+        allowed:   List of SPDX license IDs to allow
+                   (default: MIT, Apache-2.0, BSD-*, ISC, etc.).
+        license_overrides: Maps "group:artifact" to a license SPDX string to
+                           bypass Maven Central lookups (useful for testing or
+                           when a known license is not in Maven Central metadata).
+
+    Returns:
+        List of dicts [{group, artifact, version, license, status, reason}]
+        where status is "OK", "VIOLATION", "WARNING", or "UNKNOWN".
+        Only VIOLATION and WARNING items are returned (OK items filtered out).
+    """
+    from dedalus.license_checker import (  # noqa: PLC0415
+        DEFAULT_ALLOWED,
+        check_licenses,
+        parse_gradle,
+        parse_pom_xml,
+    )
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    conn = _get_connection()
+
+    # Resolve repo root path from the graph
+    root_path: str | None = None
+    if conn is not None:
+        try:
+            r = conn.execute(
+                "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.root_path",
+                {"name": repo_name},
+            )
+            if r.has_next():
+                root_path = r.get_next()[0]
+        except Exception as exc:
+            log.error("find_license_violations: DB lookup failed: %s", exc)
+
+    if root_path is None:
+        return [{"error": f"Repo {repo_name!r} not found in the graph. Index it first."}]
+
+    root = _Path(root_path)
+    deps: list[dict] = []
+
+    # Collect dependencies from pom.xml and/or Gradle build files
+    pom = root / "pom.xml"
+    if pom.exists():
+        try:
+            deps.extend(parse_pom_xml(str(pom)))
+        except Exception as exc:
+            log.error("find_license_violations: failed to parse pom.xml: %s", exc)
+
+    for gradle_name in ("build.gradle", "build.gradle.kts"):
+        gradle = root / gradle_name
+        if gradle.exists():
+            try:
+                deps.extend(parse_gradle(str(gradle)))
+            except Exception as exc:
+                log.error("find_license_violations: failed to parse %s: %s", gradle_name, exc)
+
+    if not deps:
+        return []
+
+    # Deduplicate by group:artifact
+    seen: set[str] = set()
+    unique_deps: list[dict] = []
+    for dep in deps:
+        key = f"{dep['group']}:{dep['artifact']}"
+        if key not in seen:
+            seen.add(key)
+            unique_deps.append(dep)
+
+    allowed_set = frozenset(allowed) if allowed else DEFAULT_ALLOWED
+    results = check_licenses(
+        unique_deps,
+        allowed=allowed_set,
+        license_overrides=license_overrides,
+    )
+
+    # Filter to only non-OK results
+    return [r for r in results if r["status"] != "OK"]
 
 
 # ---------------------------------------------------------------------------

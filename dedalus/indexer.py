@@ -690,7 +690,7 @@ def index_repo(
     # Batch size of 500 edges per transaction balances memory and WAL flush overhead.
     _EDGE_BATCH_SIZE = 500
 
-    calls_edges: list[tuple[str, str]] = []          # (caller_id, callee_id)
+    calls_edges: list[tuple[str, str, str]] = []       # (caller_id, callee_id, callee_name)
     unresolved_nodes: list[dict] = []                 # stub RestCall dicts
     unresolved_edges: list[tuple[str, str]] = []      # (caller_id, callee_id) for UNRESOLVED_CALL
 
@@ -723,7 +723,7 @@ def index_repo(
                 if pair in written_call_pairs:
                     continue
                 written_call_pairs.add(pair)
-                calls_edges.append((edge.caller_id, edge.callee_id))
+                calls_edges.append((edge.caller_id, edge.callee_id, edge.callee_name))
                 counters["call_edges"] += 1
             else:
                 # UNRESOLVED_CALL — collect stub RestCall node and edge
@@ -746,12 +746,12 @@ def index_repo(
         if not batch:
             break
         conn.execute("BEGIN TRANSACTION")
-        for caller_id, callee_id in batch:
+        for caller_id, callee_id, callee_name in batch:
             conn.execute(
                 "MATCH (a:Method), (b:Method) "
                 "WHERE a.id = $caller AND b.id = $callee "
-                "CREATE (a)-[:CALLS]->(b)",
-                {"caller": caller_id, "callee": callee_id},
+                "CREATE (a)-[:CALLS {callee_name: $callee_name}]->(b)",
+                {"caller": caller_id, "callee": callee_id, "callee_name": callee_name},
             )
         conn.execute("COMMIT")
 
@@ -949,25 +949,25 @@ def index_repo(
     # For every existing CALLS edge (A→B) where B.fqn is in override_index,
     # add CALLS edges (A→B1), (A→B2), etc. for each concrete override.
     r_calls = conn.execute(
-        "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id, b.fqn",
+        "MATCH (a:Method)-[c:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id, b.fqn, c.callee_name",
         {"rid": repo_id},
     )
-    fan_out_edges: list[tuple[str, str]] = []
+    fan_out_edges: list[tuple[str, str, str]] = []
     while r_calls.has_next():
-        caller_id, callee_id, callee_fqn = r_calls.get_next()
+        caller_id, callee_id, callee_fqn, edge_callee_name = r_calls.get_next()
         overrides = override_index.get(callee_fqn, [])
         for override_id in overrides:
             if override_id != callee_id and override_id in method_id_set:
-                fan_out_edges.append((caller_id, override_id))
+                fan_out_edges.append((caller_id, override_id, edge_callee_name or ""))
 
     seen_fanout: set[tuple[str, str]] = set()
-    dedup_fanout: list[tuple[str, str]] = []
-    for caller_id, callee_id in fan_out_edges:
+    dedup_fanout: list[tuple[str, str, str]] = []
+    for caller_id, callee_id, callee_name in fan_out_edges:
         pair = (caller_id, callee_id)
         if pair in written_call_pairs or pair in seen_fanout:
             continue
         seen_fanout.add(pair)
-        dedup_fanout.append((caller_id, callee_id))
+        dedup_fanout.append((caller_id, callee_id, callee_name))
         counters["call_edges"] += 1
 
     # Flush fan-out CALLS edges in 500-edge transactions
@@ -976,12 +976,12 @@ def index_repo(
         if not batch:
             break
         conn.execute("BEGIN TRANSACTION")
-        for caller_id, callee_id in batch:
+        for caller_id, callee_id, callee_name in batch:
             conn.execute(
                 "MATCH (a:Method), (b:Method) "
                 "WHERE a.id = $caller AND b.id = $callee "
-                "CREATE (a)-[:CALLS]->(b)",
-                {"caller": caller_id, "callee": callee_id},
+                "CREATE (a)-[:CALLS {callee_name: $callee_name}]->(b)",
+                {"caller": caller_id, "callee": callee_id, "callee_name": callee_name},
             )
         conn.execute("COMMIT")
 
