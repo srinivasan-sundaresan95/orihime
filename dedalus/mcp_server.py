@@ -1025,18 +1025,20 @@ def find_taint_sinks(repo_name: str) -> list[dict]:
                     "file_path": file_path,
                     "line_start": line_start,
                     "sink_category": "custom",
+                    "caller_arg_pos": -1,
+                    "callee_param_pos": -1,
                 })
 
         # Cross-service sinks via CALLS edges to methods whose FQN matches a known sink
         r_calls = conn.execute(
-            "MATCH (m:Method)-[:CALLS]->(s:Method) "
+            "MATCH (m:Method)-[c:CALLS]->(s:Method) "
             "WHERE m.repo_id = $rid "
             "MATCH (f:File) WHERE f.id = m.file_id "
-            "RETURN m.fqn, s.fqn, s.name, f.path, m.line_start",
+            "RETURN m.fqn, s.fqn, s.name, f.path, m.line_start, c.caller_arg_pos, c.callee_param_pos",
             {"rid": repo_id},
         )
         while r_calls.has_next():
-            caller_fqn, callee_fqn, callee_name, file_path, line_start = r_calls.get_next()
+            caller_fqn, callee_fqn, callee_name, file_path, line_start, cap, cpp = r_calls.get_next()
             if cfg.is_sink_method(callee_fqn) or cfg.is_sink_method(callee_name):
                 results.append({
                     "caller_fqn": caller_fqn,
@@ -1044,11 +1046,91 @@ def find_taint_sinks(repo_name: str) -> list[dict]:
                     "file_path": file_path,
                     "line_start": line_start,
                     "sink_category": "configured",
+                    "caller_arg_pos": cap if cap is not None else -1,
+                    "callee_param_pos": cpp if cpp is not None else -1,
                 })
 
         return results
     except Exception as exc:
         log.error("find_taint_sinks(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+@mcp.tool()
+def find_taint_flows(repo_name: str) -> list[dict]:
+    """Return confirmed taint flows where a tainted argument (position 0) flows to a known sink's first parameter.
+
+    Stricter than find_taint_sinks — only returns findings where:
+    1. The caller method has a @RequestParam/@RequestBody/@PathVariable parameter (taint source)
+    2. The CALLS edge has caller_arg_pos=0 (first argument is passed)
+    3. The callee method name matches a known sink
+
+    Returns:
+        List of dicts with keys:
+            ``source_method_fqn``, ``sink_method_name``, ``caller_arg_pos``,
+            ``callee_param_pos``, ``file_path``, ``line_start``, ``owasp_category``.
+    """
+    from dedalus.security_config import get_security_config  # noqa: PLC0415
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        cfg = get_security_config()
+
+        # Find all methods with taint-source annotations in this repo
+        r_sources = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND size(m.annotations) > 0 "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.id, m.fqn, m.annotations, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        source_method_ids: set[str] = set()
+        source_info: dict[str, dict] = {}  # method_id → {fqn, file_path, line_start}
+        while r_sources.has_next():
+            mid, fqn, annotations, file_path, line_start = r_sources.get_next()
+            if any(cfg.is_source_annotation(ann) for ann in (annotations or [])):
+                source_method_ids.add(mid)
+                source_info[mid] = {"fqn": fqn, "file_path": file_path, "line_start": line_start}
+
+        if not source_method_ids:
+            return []
+
+        # Follow CALLS edges from source methods where caller_arg_pos = 0
+        results: list[dict] = []
+        for source_id in source_method_ids:
+            r_calls = conn.execute(
+                "MATCH (m:Method)-[c:CALLS]->(s:Method) "
+                "WHERE m.id = $mid AND c.caller_arg_pos = 0 "
+                "RETURN s.name, s.fqn, c.caller_arg_pos, c.callee_param_pos",
+                {"mid": source_id},
+            )
+            while r_calls.has_next():
+                callee_name, callee_fqn, cap, cpp = r_calls.get_next()
+                if cfg.is_sink_method(callee_fqn) or cfg.is_sink_method(callee_name or ""):
+                    info = source_info[source_id]
+                    short = (callee_name or "").split(".")[-1]
+                    owasp = _OWASP_MAPPINGS.get(short, "A00:2021-Uncategorized")
+                    results.append({
+                        "source_method_fqn": info["fqn"],
+                        "sink_method_name": callee_fqn or callee_name,
+                        "caller_arg_pos": cap if cap is not None else 0,
+                        "callee_param_pos": cpp if cpp is not None else 0,
+                        "file_path": info["file_path"],
+                        "line_start": info["line_start"],
+                        "owasp_category": owasp,
+                    })
+
+        return results
+    except Exception as exc:
+        log.error("find_taint_flows(%r): %s", repo_name, exc)
         return [{"error": str(exc)}]
 
 

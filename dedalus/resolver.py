@@ -16,6 +16,8 @@ class CallEdge:
     callee_id: str   # Method.id (CALLS) or new uuid (UNRESOLVED_CALL)
     edge_type: str   # "CALLS" or "UNRESOLVED_CALL"
     callee_name: str = ""  # Simple method name at the call site
+    caller_arg_pos: int = -1   # position of the first argument in the caller's call expression (-1 = not tracked)
+    callee_param_pos: int = -1  # position of the matching parameter in the callee's signature (-1 = not tracked)
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +358,32 @@ def _get_object_call_key(inv_node, source_bytes: bytes) -> str | None:
     return None
 
 
+def _count_call_arguments(inv_node) -> int:
+    """Count the number of arguments in a method invocation / call expression node.
+
+    For Java ``method_invocation``: looks for an ``argument_list`` child and
+    counts non-punctuation children (skipping ``(`` ``,`` and ``)``) .
+
+    For Kotlin ``call_expression``: looks for a ``value_arguments`` child and
+    counts ``value_argument`` type children.
+
+    Returns the argument count (>= 0), or 0 if the argument list node is not found.
+    """
+    # Java: argument_list child
+    for child in inv_node.children:
+        if child.type == "argument_list":
+            # Count direct children that are not punctuation
+            _SKIP = {"(", ")", ","}
+            return sum(1 for c in child.children if c.type not in _SKIP)
+
+    # Kotlin: value_arguments child
+    for child in inv_node.children:
+        if child.type == "value_arguments":
+            return sum(1 for c in child.children if c.type == "value_argument")
+
+    return 0
+
+
 def _is_object_style_call(inv_node, source_bytes: bytes) -> bool:
     """Return True when the call is a qualified call with a type-like receiver.
 
@@ -394,6 +422,18 @@ def _process_invocation(
     if not name:
         return
 
+    # G2: Count arguments at the call site to populate caller_arg_pos / callee_param_pos.
+    # If the call has at least one argument, position 0 is tracked (first arg → first param).
+    # Constructor calls (<init>) always use -1 (not tracked).
+    _arg_count = _count_call_arguments(inv_node)
+    _is_ctor = name.endswith("<init>") if name else False
+
+    def _arg_pos() -> tuple[int, int]:
+        """Return (caller_arg_pos, callee_param_pos) for the current call site."""
+        if _is_ctor or _arg_count == 0:
+            return -1, -1
+        return 0, 0
+
     # N1: Object / companion call fast path
     if object_index and _is_object_style_call(inv_node, source_bytes):
         obj_key = _get_object_call_key(inv_node, source_bytes)
@@ -410,11 +450,14 @@ def _process_invocation(
                     obj_key2 = ".".join(parts[-2:])
                     obj_matches = object_index.get(obj_key2, [])
             if obj_matches:
+                _cap, _cpp = _arg_pos()
                 edges.append(CallEdge(
                     caller_id=caller_id,
                     callee_id=obj_matches[0],
                     edge_type="CALLS",
                     callee_name=name or obj_key,
+                    caller_arg_pos=_cap,
+                    callee_param_pos=_cpp,
                 ))
                 return
 
@@ -460,6 +503,8 @@ def _process_invocation(
                             callee_id=mid,
                             edge_type="CALLS",
                             callee_name=init_name,
+                            caller_arg_pos=-1,
+                            callee_param_pos=-1,
                         ))
                     return
             callee_id = str(uuid.uuid4())
@@ -477,12 +522,22 @@ def _process_invocation(
                         callee_id=mid,
                         edge_type="CALLS",
                         callee_name=init_name,
+                        caller_arg_pos=-1,
+                        callee_param_pos=-1,
                     ))
                 return
         callee_id = str(uuid.uuid4())
         edge_type = "UNRESOLVED_CALL"
 
-    edges.append(CallEdge(caller_id=caller_id, callee_id=callee_id, edge_type=edge_type, callee_name=name))
+    _cap, _cpp = _arg_pos()
+    edges.append(CallEdge(
+        caller_id=caller_id,
+        callee_id=callee_id,
+        edge_type=edge_type,
+        callee_name=name,
+        caller_arg_pos=_cap,
+        callee_param_pos=_cpp,
+    ))
 
 
 def _process_constructor_call(

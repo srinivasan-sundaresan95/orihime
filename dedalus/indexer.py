@@ -690,7 +690,7 @@ def index_repo(
     # Batch size of 500 edges per transaction balances memory and WAL flush overhead.
     _EDGE_BATCH_SIZE = 500
 
-    calls_edges: list[tuple[str, str, str]] = []       # (caller_id, callee_id, callee_name)
+    calls_edges: list[tuple[str, str, str, int, int]] = []  # (caller_id, callee_id, callee_name, caller_arg_pos, callee_param_pos)
     unresolved_nodes: list[dict] = []                 # stub RestCall dicts
     unresolved_edges: list[tuple[str, str]] = []      # (caller_id, callee_id) for UNRESOLVED_CALL
 
@@ -723,7 +723,7 @@ def index_repo(
                 if pair in written_call_pairs:
                     continue
                 written_call_pairs.add(pair)
-                calls_edges.append((edge.caller_id, edge.callee_id, edge.callee_name))
+                calls_edges.append((edge.caller_id, edge.callee_id, edge.callee_name, edge.caller_arg_pos, edge.callee_param_pos))
                 counters["call_edges"] += 1
             else:
                 # UNRESOLVED_CALL — collect stub RestCall node and edge
@@ -746,12 +746,13 @@ def index_repo(
         if not batch:
             break
         conn.execute("BEGIN TRANSACTION")
-        for caller_id, callee_id, callee_name in batch:
+        for caller_id, callee_id, callee_name, caller_arg_pos, callee_param_pos in batch:
             conn.execute(
                 "MATCH (a:Method), (b:Method) "
                 "WHERE a.id = $caller AND b.id = $callee "
-                "CREATE (a)-[:CALLS {callee_name: $callee_name}]->(b)",
-                {"caller": caller_id, "callee": callee_id, "callee_name": callee_name},
+                "CREATE (a)-[:CALLS {callee_name: $callee_name, caller_arg_pos: $caller_arg_pos, callee_param_pos: $callee_param_pos}]->(b)",
+                {"caller": caller_id, "callee": callee_id, "callee_name": callee_name,
+                 "caller_arg_pos": caller_arg_pos, "callee_param_pos": callee_param_pos},
             )
         conn.execute("COMMIT")
 
@@ -980,8 +981,9 @@ def index_repo(
             conn.execute(
                 "MATCH (a:Method), (b:Method) "
                 "WHERE a.id = $caller AND b.id = $callee "
-                "CREATE (a)-[:CALLS {callee_name: $callee_name}]->(b)",
-                {"caller": caller_id, "callee": callee_id, "callee_name": callee_name},
+                "CREATE (a)-[:CALLS {callee_name: $callee_name, caller_arg_pos: $caller_arg_pos, callee_param_pos: $callee_param_pos}]->(b)",
+                {"caller": caller_id, "callee": callee_id, "callee_name": callee_name,
+                 "caller_arg_pos": -1, "callee_param_pos": -1},
             )
         conn.execute("COMMIT")
 

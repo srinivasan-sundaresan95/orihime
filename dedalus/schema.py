@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import kuzu
 
-SCHEMA_VERSION: int = 9
+SCHEMA_VERSION: int = 10
 
 _NODE_TABLES = [
     """CREATE NODE TABLE Repo(
@@ -104,7 +104,7 @@ _NODE_TABLES = [
 ]
 
 _REL_TABLES = [
-    "CREATE REL TABLE CALLS(FROM Method TO Method, callee_name STRING DEFAULT '')",
+    "CREATE REL TABLE CALLS(FROM Method TO Method, callee_name STRING DEFAULT '', caller_arg_pos INT64 DEFAULT -1, callee_param_pos INT64 DEFAULT -1)",
     "CREATE REL TABLE CALLS_REST(FROM Method TO Endpoint)",
     "CREATE REL TABLE UNRESOLVED_CALL(FROM Method TO RestCall)",
     "CREATE REL TABLE CONTAINS_CLASS(FROM File TO Class)",
