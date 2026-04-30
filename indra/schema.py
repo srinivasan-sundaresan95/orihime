@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import kuzu
 
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 
 _NODE_TABLES = [
     """CREATE NODE TABLE Repo(
@@ -25,6 +25,8 @@ _NODE_TABLES = [
         file_id STRING,
         repo_id STRING,
         is_interface BOOLEAN,
+        is_object BOOLEAN DEFAULT false,
+        enclosing_class_name STRING,
         annotations STRING[],
         PRIMARY KEY(id)
     )""",

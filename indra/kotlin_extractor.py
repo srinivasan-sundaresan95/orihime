@@ -359,6 +359,12 @@ class KotlinExtractor:
             fqn = f"{package}.{class_name}" if package else class_name
 
             is_interface = class_node.type == "interface_declaration"
+            is_object = class_node.type in ("object_declaration", "companion_object")
+            enclosing_class_name: str | None = (
+                _companion_enclosing_class_name(class_node, src)
+                if class_node.type == "companion_object"
+                else None
+            )
 
             class_id = str(uuid.uuid4())
             classes.append({
@@ -368,6 +374,8 @@ class KotlinExtractor:
                 "file_id": file_id,
                 "repo_id": repo_id,
                 "is_interface": is_interface,
+                "is_object": is_object,
+                "enclosing_class_name": enclosing_class_name,
                 "annotations": class_annotations,
             })
 
@@ -387,7 +395,7 @@ class KotlinExtractor:
                     "line_start": 0,
                     "is_suspend": False,
                     "annotations": [],
-                    "generated": False,
+                    "generated": True,
                 })
 
             # Extract EXTENDS/IMPLEMENTS inheritance edges (class and object only)
@@ -477,6 +485,8 @@ class KotlinExtractor:
                 "file_id": file_id,
                 "repo_id": repo_id,
                 "is_interface": False,
+                "is_object": False,
+                "enclosing_class_name": None,
                 "annotations": [],
             })
             for fn_node in fn_list:
@@ -531,6 +541,24 @@ _CLASS_NODE_TYPES = frozenset({
     "companion_object",
     "interface_declaration",
 })
+
+
+def _companion_enclosing_class_name(class_node, src: bytes) -> str | None:
+    """Return the name of the class that directly contains a companion_object node.
+
+    Walk: companion_object → parent (class_body) → grandparent (class_declaration).
+    Returns the identifier text of the enclosing class, or None if not found.
+    """
+    parent = class_node.parent  # class_body
+    if parent is None:
+        return None
+    grandparent = parent.parent  # class_declaration
+    if grandparent is None:
+        return None
+    name_node = _child_by_type(grandparent, "identifier")
+    if name_node is None:
+        return None
+    return _node_text(name_node, src).strip()
 
 
 def _resolve_class_name(class_node, src: bytes) -> str | None:

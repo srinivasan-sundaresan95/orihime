@@ -43,6 +43,7 @@ def resolve_calls(
     file_id: str,
     repo_id: str,
     impl_index: dict[str, str] | None = None,  # NEW — optional, defaults to None
+    classes: list[dict] | None = None,   # N1 — Kotlin object/companion resolution
 ) -> list[CallEdge]:
     """Walk all method bodies in *tree* and emit call edges.
 
@@ -70,6 +71,13 @@ def resolve_calls(
                       produced by P3-1.1.  When provided, UNRESOLVED calls
                       are redirected to impl-class methods when a unique
                       match exists.
+        classes:      Optional list of class dicts (as produced by
+                      KotlinExtractor).  When provided, an ``_object_index``
+                      is built so that Kotlin ``object`` declarations and
+                      companion object calls are resolved via a precise
+                      ``ClassName.method`` key rather than falling through to
+                      the ambiguous suffix index.  Pass ``None`` (default) to
+                      preserve existing behavior.
 
     Returns:
         List of :class:`CallEdge` instances.
@@ -103,6 +111,36 @@ def resolve_calls(
                 class_simple = parts[-2]
                 key = f"{class_simple}.<init>"
                 _ctor_index.setdefault(key, []).append(mid)
+
+    # N1: Build object index: "ClassName.method" and companion variants → [method_id]
+    _object_index: dict[str, list[str]] = {}
+    if classes is not None:
+        _cls_by_name: dict[str, dict] = {c["name"]: c for c in classes}
+        for fqn, mid in fqn_index.items():
+            parts = fqn.rsplit(".", 1)
+            if len(parts) != 2:
+                continue
+            class_fqn_part, method_name = parts
+            class_simple = class_fqn_part.rsplit(".", 1)[-1]
+            cls = _cls_by_name.get(class_simple)
+            if cls is None or not cls.get("is_object", False):
+                continue
+            enclosing = cls.get("enclosing_class_name")
+            if enclosing is None:
+                # Standalone object_declaration
+                key = f"{class_simple}.{method_name}"
+                _object_index.setdefault(key, []).append(mid)
+                if class_simple.endswith("Companion"):
+                    base = class_simple[:-len("Companion")]
+                    if base:
+                        _object_index.setdefault(f"{base}.{method_name}", []).append(mid)
+            else:
+                # companion_object: register multiple key patterns
+                _object_index.setdefault(f"{enclosing}.{class_simple}.{method_name}", []).append(mid)
+                _object_index.setdefault(f"{enclosing}.Companion.{method_name}", []).append(mid)
+                if class_simple.endswith("Companion"):
+                    _object_index.setdefault(f"{enclosing}.{method_name}", []).append(mid)
+                _object_index.setdefault(f"{class_simple}.{method_name}", []).append(mid)
 
     # When impl_index is active, restrict suffix matches to local methods to
     # prevent accidental wiring to unregistered impl classes.  Cross-file
@@ -138,6 +176,7 @@ def resolve_calls(
                 impl_index=impl_index,
                 local_method_ids=_local_method_ids,
                 ctor_index=_ctor_index,
+                object_index=_object_index,
             )
         elif node.type == "constructor_declaration":
             # Java constructor body: treat as its class's <init> method
@@ -151,6 +190,7 @@ def resolve_calls(
                 impl_index=impl_index,
                 local_method_ids=_local_method_ids,
                 ctor_index=_ctor_index,
+                object_index=_object_index,
             )
 
     return edges
@@ -218,6 +258,7 @@ def _process_method_node(
     impl_index: dict[str, str] | None,
     local_method_ids: set[str],
     ctor_index: "dict[str, list[str]] | None" = None,
+    object_index: "dict[str, list[str]] | None" = None,
 ) -> None:
     """Emit CallEdge objects for all call sites inside *method_node*."""
     caller_id = _find_enclosing_method(method_node, source_bytes, methods)
@@ -248,6 +289,7 @@ def _process_method_node(
                 impl_index=impl_index,
                 local_method_ids=local_method_ids,
                 ctor_index=ctor_index,
+                object_index=object_index,
             )
         elif node.type == "object_creation_expression":
             # Java: `new ClassName(...)` — emit a CALLS edge to ClassName.<init>
@@ -306,6 +348,14 @@ def _get_invocation_name(inv_node, source_bytes: bytes) -> str | None:
     return None
 
 
+def _get_object_call_key(inv_node, source_bytes: bytes) -> str | None:
+    """Return the navigation_expression text for an object-style call, or None."""
+    for child in inv_node.children:
+        if child.type == "navigation_expression":
+            return source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+    return None
+
+
 def _is_object_style_call(inv_node, source_bytes: bytes) -> bool:
     """Return True when the call is a qualified call with a type-like receiver.
 
@@ -337,11 +387,36 @@ def _process_invocation(
     impl_index: dict[str, str] | None = None,
     local_method_ids: set[str] | None = None,
     ctor_index: "dict[str, list[str]] | None" = None,
+    object_index: "dict[str, list[str]] | None" = None,
 ) -> None:
     """Emit one CallEdge for this invocation node."""
     name = _get_invocation_name(inv_node, source_bytes)
     if not name:
         return
+
+    # N1: Object / companion call fast path
+    if object_index and _is_object_style_call(inv_node, source_bytes):
+        obj_key = _get_object_call_key(inv_node, source_bytes)
+        if obj_key is not None:
+            # The key from the AST includes the full navigation expression text,
+            # e.g. "DateTimeUtil.format" or "ActiveCampaignInfo.of"
+            # Strip any package prefix the key might have picked up
+            # by trying progressively shorter suffixes
+            obj_matches = object_index.get(obj_key, [])
+            # Also try last two segments if full text didn't match
+            if not obj_matches:
+                parts = obj_key.rsplit(".", 2)
+                if len(parts) >= 2:
+                    obj_key2 = ".".join(parts[-2:])
+                    obj_matches = object_index.get(obj_key2, [])
+            if obj_matches:
+                edges.append(CallEdge(
+                    caller_id=caller_id,
+                    callee_id=obj_matches[0],
+                    edge_type="CALLS",
+                    callee_name=name or obj_key,
+                ))
+                return
 
     # Suffix matches are restricted to local methods when impl_index is active
     # to prevent accidental wiring to unregistered impl classes; cross-file
@@ -470,6 +545,7 @@ def _process_constructor_body(
     impl_index: dict[str, str] | None,
     local_method_ids: set[str],
     ctor_index: "dict[str, list[str]] | None" = None,
+    object_index: "dict[str, list[str]] | None" = None,
 ) -> None:
     """Walk a Java ``constructor_declaration`` body and emit CALLS edges.
 
@@ -514,6 +590,7 @@ def _process_constructor_body(
                 impl_index=impl_index,
                 local_method_ids=local_method_ids,
                 ctor_index=ctor_index,
+                object_index=object_index,
             )
         elif node.type == "object_creation_expression":
             _process_constructor_call(

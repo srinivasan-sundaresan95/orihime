@@ -82,12 +82,18 @@ def test_bff_endpoints_have_paths(bff_conn):
 
 @pytest.mark.integration
 def test_bff_methods_have_line_start(bff_conn):
-    """Every Method node should have line_start > 0."""
-    result = bff_conn.execute("MATCH (m:Method) RETURN m.line_start")
+    """Every non-generated Method node should have line_start > 0.
+
+    Synthetic <init> nodes (generated=true, added in Phase 6-1) have no
+    source location by design and are excluded from this check.
+    """
+    result = bff_conn.execute(
+        "MATCH (m:Method) WHERE m.generated = false RETURN m.line_start"
+    )
     line_starts = []
     while result.has_next():
         line_starts.append(result.get_next()[0])
-    print(f"\n[bff] total methods checked = {len(line_starts)}")
+    print(f"\n[bff] total non-generated methods checked = {len(line_starts)}")
     assert len(line_starts) > 0, "No methods found to validate"
     bad = [ls for ls in line_starts if ls is None or ls <= 0]
     assert bad == [], f"Found {len(bad)} method(s) with line_start <= 0 or None: {bad[:10]}"

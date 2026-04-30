@@ -744,6 +744,8 @@ class JavaExtractor:
                 "file_id": file_id,
                 "repo_id": repo_id,
                 "is_interface": is_interface,
+                "is_object": False,
+                "enclosing_class_name": None,
                 "annotations": annotations,
             }
         )
@@ -762,7 +764,7 @@ class JavaExtractor:
                     "line_start": 0,
                     "is_suspend": False,
                     "annotations": [],
-                    "generated": False,
+                    "generated": True,
                 }
             )
 

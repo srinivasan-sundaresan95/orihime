@@ -358,7 +358,9 @@ def index_repo(
             conn.execute(
                 "CREATE (:Class {"
                 "id: $id, name: $name, fqn: $fqn, file_id: $file_id, "
-                "repo_id: $repo_id, is_interface: $is_interface, annotations: $annotations"
+                "repo_id: $repo_id, is_interface: $is_interface, "
+                "is_object: $is_object, enclosing_class_name: $enclosing_class_name, "
+                "annotations: $annotations"
                 "})",
                 cls,
             )
@@ -424,6 +426,11 @@ def index_repo(
     # -----------------------------------------------------------------------
     # Phase 3 — resolve call edges (serial — needs full fqn_index)
     # -----------------------------------------------------------------------
+    all_classes: list[dict] = []
+    for pr in parse_results.values():
+        all_classes.extend(pr.classes)
+    # N1: pass classes=all_classes to resolve_calls once resolver.py accepts the parameter
+
     fqn_index = build_fqn_index(all_methods)
     method_id_set: set[str] = {m["id"] for m in all_methods}
 
@@ -449,6 +456,7 @@ def index_repo(
             file_id,
             repo_id,
             impl_index=impl_index,   # NEW — redirect UNRESOLVED calls to impl classes
+            classes=all_classes,     # N1 — Kotlin object/companion resolution
         )
 
         for edge in edges:
