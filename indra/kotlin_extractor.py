@@ -358,7 +358,15 @@ class KotlinExtractor:
                 continue
             fqn = f"{package}.{class_name}" if package else class_name
 
-            is_interface = class_node.type == "interface_declaration"
+            # tree-sitter-kotlin represents `interface Foo` as a class_declaration
+            # with an `interface` keyword child, NOT as interface_declaration.
+            is_interface = (
+                class_node.type == "interface_declaration"
+                or (
+                    class_node.type == "class_declaration"
+                    and any(c.type == "interface" for c in class_node.children)
+                )
+            )
             is_object = class_node.type in ("object_declaration", "companion_object")
             enclosing_class_name: str | None = (
                 _companion_enclosing_class_name(class_node, src)
@@ -384,7 +392,7 @@ class KotlinExtractor:
             # Only regular classes can be instantiated this way; object
             # declarations (singletons), companion objects, and interfaces
             # cannot be constructed via a call_expression.
-            if class_node.type == "class_declaration":
+            if class_node.type == "class_declaration" and not is_interface:
                 methods.append({
                     "id": str(uuid.uuid4()),
                     "name": "<init>",
