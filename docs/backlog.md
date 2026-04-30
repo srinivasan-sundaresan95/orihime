@@ -1,103 +1,156 @@
 # Indra — Post-v1.2 Backlog
 
-## Aikido vs SonarQube Gap Analysis
+## What v1.2 Already Covers
 
-**Context**: We use SonarQube Community (SAST). Indra v1.2 already covers:
-- S4: Cross-service taint (BFS from endpoint handlers to outbound HTTP calls)
-- S5: Custom sources/sinks YAML (`~/.indra/security.yml`)
-- S6: Second-order injection (write-to-DB + read-from-DB chain detection)
-- S7: OWASP / CWE / PCI DSS / STIG compliance reports
+| Capability | SonarQube Coverage | Indra |
+|---|---|---|
+| Cross-file taint (SAST) | Community ✓ | S4 ✓ |
+| Custom sources/sinks YAML | Enterprise | S5 ✓ |
+| Second-order injection | Neither | S6 ✓ |
+| OWASP/CWE/PCI/STIG reports | Enterprise | S7 ✓ |
 
-| Capability | SonarQube Coverage | Indra v1.2 | Feasibility |
-|---|---|---|---|
-| Cross-file taint (SAST) | Community ✓ | S4 ✓ | Done |
-| Custom sources/sinks | Enterprise | S5 ✓ | Done |
-| Second-order injection | Neither | S6 ✓ | Done |
-| OWASP/CWE/PCI/STIG reports | Enterprise | S7 ✓ | Done |
-| **Reachability filtering** | Enterprise partial | ✗ | **High** |
-| **Secrets detection** | Community ✓ | ✗ | **High** |
-| Dependency CVE scoring | Enterprise SCA | ✗ | Medium |
-| License compliance | Enterprise SCA | ✗ | Medium |
-| IDE real-time feedback | Not SonarQube | ✗ | Medium |
-| Auto-patch generation | Not SonarQube | ✗ | Low (LLM+CI) |
-| Runtime validation | Not SonarQube | ✗ | Low (runtime) |
-| Malware in deps | Not SonarQube | ✗ | Low (behavioral) |
-| IaC scanning | Enterprise partial | N/A | N/A (K8s has OPA) |
-
-**Estimated coverage**: Indra closes ~70% of Aikido's advantage over SonarQube Community.
+Indra closes ~70% of Aikido's advantage over SonarQube Community within a static graph.
 
 ---
 
-## Proposed Backlog Items (Priority Order)
-
-### S8 — Entry-Point Reachability Filtering (High, ~80h)
-
-**What**: Extend Indra to identify all entry points — HTTP handlers, Kafka consumers (`@KafkaListener`), schedulers (`@Scheduled`), JMS listeners — then mark each taint finding as "reachable from entry point" or "dead code path". Reduces alert volume by 30–50%.
-
-**Implementation**:
-- Tree-sitter pass: detect `@KafkaListener`, `@Scheduled`, `@JmsListener`, `@RabbitListener` annotations → add `is_entry_point BOOLEAN` to Method node
-- New MCP tool: `find_reachable_sinks(repo_name)` — filter `find_taint_sinks` results to only those reachable from an entry point via BFS on CALLS edges
-- UI: add "Reachable only" toggle to security findings page
-
-### S9 — Hardcoded Secrets Detection (High, ~20h)
-
-**What**: Detect API keys, tokens, passwords, private keys hardcoded in source files. SonarQube Community already does basic pattern matching, but Indra can correlate secrets with the methods/classes that use them (blast radius).
-
-**Implementation**:
-- In `_parse_file`: scan raw `src_bytes` for high-entropy strings and common secret patterns (AWS keys, GCP JSON, JWT, PEM, Bearer tokens, password assignments)
-- Store `SecretFinding` nodes (pattern, file_id, line_start, entropy_score)
-- MCP tool: `find_secrets(repo_name)` returning findings sorted by entropy
-- Exclude test files by default
-
-### S10 — Dependency CVE Scoring (Medium, ~40h)
-
-**What**: Parse `pom.xml` / `build.gradle` to extract dependency coordinates, enrich with NVD CVE data, combine with reachability to prioritise: "this CVE affects a library your code actually calls".
-
-**Implementation**:
-- New walker extension: detect `pom.xml` / `build.gradle.kts` → extract `{groupId, artifactId, version}`
-- Post-index step: query NVD API (`https://services.nvd.nist.gov/rest/json/cves/2.0`) for each dependency
-- Store `Dependency` node + `CVEFinding` node
-- MCP tool: `find_vulnerable_dependencies(repo_name)` with optional reachability filter
-- Cache CVE results to avoid hitting rate limits
-
-### S11 — License Compliance (Medium, ~30h)
-
-**What**: Flag dependencies with GPL/AGPL/LGPL licenses in a commercial project. Parse Maven/Gradle dependency tree, look up SPDX license identifiers.
-
-**Implementation**:
-- Extend S10 dependency walker with license lookup (Maven Central SPDX metadata or OSS Index API)
-- MCP tool: `find_license_violations(repo_name, allowed_licenses=["MIT","Apache-2.0","BSD-2-Clause"])` 
-
-### S12 — IDE LSP Integration (Medium, ~60h)
-
-**What**: Language Server Protocol server that maps Indra findings back to source positions, enabling IntelliJ/VS Code to show taint warnings inline without re-running the full scan.
-
-**Implementation**:
-- Thin LSP server wrapping Indra MCP queries
-- Map finding `file_path + line_start` to LSP `textDocument/publishDiagnostics` protocol
-- Trigger re-check on file save (incremental re-index already in v1.1-A)
+## Backlog (Priority Order)
 
 ---
 
-## Other General Improvements
+### S8 — Entry-Point Reachability Filtering (~80h)
 
-### G1 — callee_name on CALLS edges (Medium, ~30h)
-Store the method name being called on CALLS edges (not just source/target IDs). Enables "what external library methods does this service call?" queries without needing the callee's source indexed.
+**What**: Today S4–S7 report every taint path that exists structurally in the code, including paths through dead code and internal-only utilities that are never called from a real entry point. S8 suppresses those false positives.
 
-### G2 — Argument position tracking on CALLS (Medium, ~40h)
-Add `caller_arg_pos INT64` and `callee_param_pos INT64` to CALLS edges. Required for precise data-flow taint (not just reachability). Enables "does arg 0 of method A flow to arg 1 of method B?"
+A taint finding is only surfaced if there is a CALLS path from a known entry point to the taint source. Entry points are: HTTP handlers (`@GetMapping` etc.), Kafka consumers (`@KafkaListener`), scheduled tasks (`@Scheduled`), JMS/RabbitMQ listeners. Everything else is hidden by default (with an opt-in "show all" flag).
 
-### G3 — Python language support (Medium, ~50h)
-Add `python_extractor.py` using `tree-sitter-python`. Django/Flask endpoint detection (`@app.route`, `@csrf_exempt`), function calls, imports. Needed if team has Python services.
+Expected impact: 30–50% reduction in alert volume with no new true positives missed.
 
-### G4 — UI security findings page (High, ~20h)
-Add a dedicated "Security" tab in the web UI that shows findings from S4–S9 in a table with OWASP category, file, line, severity, and a copy-link button. Currently findings are only available via MCP.
+**Implementation**:
+- Tree-sitter pass: detect `@KafkaListener`, `@Scheduled`, `@JmsListener`, `@RabbitListener` → add `is_entry_point BOOLEAN` to Method node (HTTP handlers already indexed as Endpoints)
+- `find_reachable_sinks(repo_name)` MCP tool — BFS from entry points, filter `find_taint_sinks` to reachable only
+- UI: "Reachable only" toggle on security findings page
 
-### G5 — Parallel DB writes via connection pool (Low, ~40h)
-KuzuDB's single-writer constraint means Phase 2 is serial. Investigate whether KuzuDB's upcoming multi-writer support or a WAL-based approach can speed up the write phase for repos > 500 files.
+---
 
-### G6 — `--watch` mode (Low, ~30h)
-Run `inotifywait` (Linux) or `FSEvents` (Mac) to trigger incremental re-index automatically on file save. Combined with v1.1-A blob hash skipping, this would keep the graph near-real-time.
+### G7 — Static Complexity Hints (~30h)
+
+**What**: Tree-sitter structural analysis to detect high-complexity patterns in method bodies, tagged on Method nodes as `complexity_hint`. No runtime data needed — immediate value from static structure alone.
+
+Patterns detected:
+- Nested loops over collections → `O(n²)-candidate`
+- `.contains()` / `.indexOf()` on `List` inside a loop → `O(n²)-list-scan` (should be a `Set`)
+- Recursive call to self without memoization → `recursive`
+- JPA collection fetch inside a loop → `n+1-risk` (extends existing `find_eager_fetches`)
+- Unbounded JPQL/query called from an endpoint with no `Pageable` parameter → `unbounded-query`
+
+**Implementation**:
+- New `complexity_pass.py` running after the main extractor on each Method's body subtree
+- Add `complexity_hint STRING DEFAULT ''` to Method node (SCHEMA_VERSION bump)
+- MCP tool: `find_complexity_hints(repo_name, min_severity="medium")` — list methods with hints, sorted by call-graph degree (high-degree + O(n²) = highest risk)
+
+---
+
+### G8 — Perf Result Ingestion + Hotspot Correlation (~20h)
+
+**What**: Accept load test results (JMeter XML, Gatling simulation.log, or a simple JSON) and correlate with the static graph and G7 complexity hints to identify confirmed hotspots and capacity ceilings.
+
+**What becomes possible with perf data:**
+
+*Single load test run:*
+- Critical call chain: walk CALLS graph from endpoint, weight each hop by callee p99, find longest weighted path — where time actually goes
+- Variance risk: methods where `p99/p50 > 4` are unstable under load; flag as `HIGH_VARIANCE`
+- Little's Law ceiling per endpoint: `concurrency = RPS × p99`. From thread pool size → RPS at which endpoint saturates
+
+*Multiple runs at different RPS (load sweep):*
+- Inflection point: fit p99 vs RPS curve; where second derivative goes positive = saturation threshold
+- Flag endpoints within 20% of their estimated saturation RPS
+
+*Live Prometheus/Mon-aaS data:*
+- Same analysis but continuously updated. Indra already has Mon-aaS MCP available
+- Drift detection: p99 growing week-over-week on a method with `O(n²)` hint = leading indicator of data-growth regression before it becomes an incident
+
+*Cross-service cascade risk:*
+- If Service A calls Service B (via CALLS_REST) and Service B saturates at 200 RPS, then Service A degrades at any load generating >200 RPS downstream — even if Service A's own code is fine. The cross-service call graph makes this visible in a way no single-service tool can.
+
+**New graph nodes:**
+```
+PerfSample:       {id, method_fqn, p50_ms, p99_ms, rps, sample_time, source}
+CapacityEstimate: {id, endpoint_fqn, saturation_rps, ceiling_concurrency, risk_level}
+OBSERVED_AT:      Method → PerfSample
+```
+
+**MCP tools:**
+- `ingest_perf_results(repo_name, file_path)` — load JMeter/Gatling/JSON into graph
+- `find_hotspots(repo_name)` — static hints × p99, sorted by risk score
+- `estimate_capacity(repo_name)` — Little's Law per endpoint, flags near-saturation
+- `find_cascade_risk(repo_name)` — downstream saturation limits on upstream endpoints
+
+*Note: No tool today does this. SonarQube, Datadog, Grafana, Gatling each see only their slice. Indra is the join layer.*
+
+---
+
+### G4 — Security + Performance Findings UI Tab (~25h)
+
+Add a dedicated tab in the web UI showing findings from S4–S8 and G7–G8 in a filterable table: OWASP category, file, line, severity, complexity hint, p99 if available. Currently findings are MCP-only.
+
+---
+
+### G5 — Batch DB Writes (~25h)
+
+**Problem**: KuzuDB's single-writer constraint means Phase 2 (all INSERTs) is fully serial — one CREATE per node. For repos >500 files this is the indexing bottleneck.
+
+**Fix (Option A — batch INSERT, recommended first)**: Buffer all nodes from all ParseResults in memory, then write per table using KuzuDB's multi-row COPY FROM syntax. Expected 5–10× write speedup with no architecture change, ~20h.
+
+**Fix (Option B — WAL staging, if A isn't enough)**: Write Phase 2 results to an Arrow/Parquet file first (in-memory, near-instant), then bulk-load into KuzuDB in one pass. Fully decouples parse speed from DB write speed, ~40h total.
+
+**Note on multi-repo bare metal hosting**: KuzuDB is an embedded database (like SQLite). For a single bare metal server serving a team, the right wrapper is a thin FastAPI serialization layer that owns the KuzuDB connection singleton, queues writes, and exposes HTTP endpoints for index + query. This unblocks the "UI running + CI re-indexing simultaneously crashes" problem without migrating the DB engine. See G9 for the longer-term option.
+
+---
+
+### G3 — Node.js / TypeScript / Next.js Extractor (~60h)
+
+`tree-sitter-javascript` and `tree-sitter-typescript` are both MIT-licensed. What can be extracted for the frontend layer (Point Bank BFF frontend, `react-hello-world` PoC):
+
+- **Next.js App Router**: `export async function GET/POST/PUT/DELETE` → Endpoint nodes
+- **Next.js Pages Router**: `export default function handler(req, res)` → Endpoint nodes
+- **Express/Fastify**: `app.get/post/put/delete(path, handler)` → Endpoint nodes
+- **`fetch()`, `axios.get/post`**: → RestCall nodes
+- ES6 classes and methods → Class + Method nodes
+- `import` graph → future dependency analysis
+
+Python support (Django/Flask) is lower priority given current stack; keep as a placeholder.
+
+---
+
+### G1 — Callee Name on CALLS Edges (~30h)
+
+Store the method name being called on CALLS edges (not just source/target node IDs). Enables "what external library methods does this service call?" without needing the callee's source indexed. Required foundation for precise argument-level taint (G2).
+
+---
+
+### G2 — Argument Position on CALLS Edges (~40h)
+
+Add `caller_arg_pos INT64` and `callee_param_pos INT64` to CALLS edges. Enables precise data-flow taint: "does argument 0 of method A flow to parameter 1 of method B?" Upgrades S4 from reachability-based to value-flow-based taint — closer to CodeQL's analysis depth.
+
+---
+
+### S11 — License Compliance (~30h, low priority)
+
+Flag GPL/AGPL/LGPL dependencies in a commercial project. Parse Maven/Gradle dependency tree, look up SPDX identifiers from Maven Central metadata or OSS Index API.
+
+MCP tool: `find_license_violations(repo_name, allowed=["MIT","Apache-2.0","BSD-2-Clause"])`
+
+---
+
+### G9 — FalkorDB Migration for Multi-User Server (~60h)
+
+**When to do this**: When the bare metal server serves >3 concurrent users or >10 repos and Option A of G5 is no longer sufficient.
+
+FalkorDB (MIT licence, Redis module) speaks openCypher — the same query language as KuzuDB. It runs as a proper server process, supports concurrent reads, has Redis AUTH, and scales to tens of millions of nodes. The Cypher queries in Indra are ~95% compatible.
+
+Migration path: schema DDL rewrite + swap Python client (`falkordb` vs `kuzu`). The incremental re-index (v1.1-A), branch mode (v1.1-B), and all MCP tools continue working unchanged.
+
+Apache AGE on PostgreSQL is an alternative if you're already running PG infrastructure, but the query translation is more complex.
 
 ---
 
@@ -105,8 +158,12 @@ Run `inotifywait` (Linux) or `FSEvents` (Mac) to trigger incremental re-index au
 
 | Capability | Reason |
 |---|---|
-| Auto-patch generation | Requires LLM + CI/CD pipeline; belongs in a separate agent workflow |
+| Hardcoded secrets detection (S9) | Detekt secrets plugin + SonarQube Community S6437 + GitHub push protection already cover this |
+| Dependency CVE standalone (S10) | Dependabot, SonarQube Community SCA, Snyk all do this; Indra's angle (reachability-aware CVE) is a follow-on to S8 + G9, not a standalone project |
+| IDE LSP integration (S12) | SonarLint + Detekt IntelliJ plugin already provide inline warnings; a fourth source causes alert fatigue; CI/CD is the better Indra integration point |
+| Watch mode (G6) | A Git post-commit hook calling `python -m indra index` is a one-liner; v1.1-A blob hash skipping makes it fast enough |
+| Auto-patch generation | Requires LLM + CI/CD pipeline; separate agent workflow |
 | Runtime vulnerability validation | Requires live app + network; fundamentally dynamic |
-| Malware in dependencies | Requires behavioral sandboxing (YARA rules, package registry feeds) |
-| Container/OS layer scanning | Docker image scanning — separate tool (Trivy, Grype); out of Indra scope |
-| IaC misconfiguration | Terraform/Helm scanning — separate tool (Checkov, tfsec); Rakuten uses OPA/Kyverno |
+| Malware in dependencies | Requires behavioral sandboxing |
+| Container/OS layer scanning | Trivy/Grype; out of scope |
+| IaC misconfiguration | Checkov/tfsec; Rakuten uses OPA/Kyverno |
