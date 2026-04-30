@@ -143,6 +143,7 @@ def _parse_file(args: tuple) -> ParseResult:
     result.endpoints = extract_result.endpoints
     result.rest_calls = extract_result.rest_calls
     result.impl_map = extract_result.impl_map
+    result.inheritance_edges = extract_result.inheritance_edges
 
     return result
 
@@ -182,6 +183,13 @@ def _delete_repo_data(conn: kuzu.Connection, repo_id: str) -> None:
     # Edges FROM Repo
     conn.execute(
         "MATCH (r:Repo)-[e:EXPOSES]->(ep:Endpoint) WHERE r.id = $rid DELETE e", rid
+    )
+    # Inheritance edges
+    conn.execute(
+        "MATCH (a:Class)-[r:EXTENDS]->(b:Class) WHERE a.repo_id = $rid DELETE r", rid
+    )
+    conn.execute(
+        "MATCH (a:Class)-[r:IMPLEMENTS]->(b:Class) WHERE a.repo_id = $rid DELETE r", rid
     )
 
     # --- node tables ---
@@ -266,6 +274,7 @@ def index_repo(
         "endpoints": 0,
         "rest_calls": 0,
         "call_edges": 0,
+        "inheritance_edges": 0,
     }
 
     work_items_base: list[tuple[str, str, str, str]] = []
@@ -355,7 +364,8 @@ def index_repo(
                 "CREATE (:Method {"
                 "id: $id, name: $name, fqn: $fqn, class_id: $class_id, "
                 "file_id: $file_id, repo_id: $repo_id, line_start: $line_start, "
-                "is_suspend: $is_suspend, annotations: $annotations"
+                "is_suspend: $is_suspend, annotations: $annotations, "
+                "generated: $generated"
                 "})",
                 method,
             )
@@ -385,6 +395,12 @@ def index_repo(
                 rc,
             )
             counters["rest_calls"] += 1
+
+    # FQN → class_id for inheritance edge resolution (built after all Class nodes written)
+    fqn_to_class_id: dict[str, str] = {}
+    for pr in parse_results.values():
+        for cls in pr.classes:
+            fqn_to_class_id[cls["fqn"]] = cls["id"]
 
     # -----------------------------------------------------------------------
     # Phase 3 — resolve call edges (serial — needs full fqn_index)
@@ -483,5 +499,33 @@ def index_repo(
                 "CREATE (r)-[:EXPOSES]->(e)",
                 {"rid": repo_id, "eid": ep["id"]},
             )
+
+    # -----------------------------------------------------------------------
+    # Phase 5 — Inheritance edges
+    # -----------------------------------------------------------------------
+    seen_inheritance: set[tuple[str, str, str]] = set()
+    for pr in parse_results.values():
+        for edge in pr.inheritance_edges:
+            child_id   = edge["child_id"]
+            parent_fqn = edge["parent_fqn"]
+            edge_type  = edge["edge_type"]
+            parent_id  = fqn_to_class_id.get(parent_fqn)
+            if parent_id is None:
+                continue
+            key = (child_id, parent_fqn, edge_type)
+            if key in seen_inheritance:
+                continue
+            seen_inheritance.add(key)
+            if edge_type == "EXTENDS":
+                conn.execute(
+                    "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:EXTENDS]->(b)",
+                    {"cid": child_id, "pid": parent_id},
+                )
+            elif edge_type == "IMPLEMENTS":
+                conn.execute(
+                    "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:IMPLEMENTS]->(b)",
+                    {"cid": child_id, "pid": parent_id},
+                )
+            counters["inheritance_edges"] += 1
 
     return counters

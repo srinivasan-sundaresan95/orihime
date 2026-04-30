@@ -117,11 +117,12 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def find_callers(method_fqn: str) -> list[dict]:
+def find_callers(method_fqn: str, exclude_generated: bool = False) -> list[dict]:
     """Find all methods that directly call the given method.
 
     Args:
         method_fqn: Fully-qualified method name, e.g. ``com.example.Foo.bar``.
+        exclude_generated: When True, filter out Lombok/compiler-generated callers.
 
     Returns:
         List of dicts with keys ``fqn``, ``file_path``, ``line_start``.
@@ -131,9 +132,10 @@ def find_callers(method_fqn: str) -> list[dict]:
     if conn is None:
         return []
     try:
+        gen_filter = " AND caller.generated = false" if exclude_generated else ""
         result = conn.execute(
             "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
-            "WHERE callee.fqn = $fqn "
+            f"WHERE callee.fqn = $fqn{gen_filter} "
             "MATCH (f:File) WHERE f.id = caller.file_id "
             "RETURN caller.fqn AS fqn, f.path AS file_path, caller.line_start AS line_start",
             {"fqn": method_fqn},
@@ -149,11 +151,12 @@ def find_callers(method_fqn: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def find_callees(method_fqn: str) -> list[dict]:
+def find_callees(method_fqn: str, exclude_generated: bool = False) -> list[dict]:
     """Find all methods directly called by the given method.
 
     Args:
         method_fqn: Fully-qualified method name, e.g. ``com.example.Foo.bar``.
+        exclude_generated: When True, filter out Lombok/compiler-generated callees.
 
     Returns:
         List of dicts with keys ``fqn``, ``file_path``, ``line_start``.
@@ -163,9 +166,10 @@ def find_callees(method_fqn: str) -> list[dict]:
     if conn is None:
         return []
     try:
+        gen_filter = " AND callee.generated = false" if exclude_generated else ""
         result = conn.execute(
             "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
-            "WHERE caller.fqn = $fqn "
+            f"WHERE caller.fqn = $fqn{gen_filter} "
             "MATCH (f:File) WHERE f.id = callee.file_id "
             "RETURN callee.fqn AS fqn, f.path AS file_path, callee.line_start AS line_start",
             {"fqn": method_fqn},
@@ -281,7 +285,7 @@ def find_repo_dependencies(repo_name: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def blast_radius(method_fqn: str, max_depth: int = 3) -> list[dict]:
+def blast_radius(method_fqn: str, max_depth: int = 3, exclude_generated: bool = False) -> list[dict]:
     """Find all methods transitively affected by changing the given method.
 
     Performs a breadth-first traversal of CALLS edges in reverse
@@ -290,6 +294,7 @@ def blast_radius(method_fqn: str, max_depth: int = 3) -> list[dict]:
     Args:
         method_fqn: FQN of the method being changed, e.g. ``com.example.Foo.bar``.
         max_depth:  Maximum number of hops to traverse (default 3, max 10).
+        exclude_generated: When True, filter out Lombok/compiler-generated callers.
 
     Returns:
         List of dicts with keys ``fqn``, ``file_path``, and ``depth``.
@@ -308,18 +313,20 @@ def blast_radius(method_fqn: str, max_depth: int = 3) -> list[dict]:
         queue: deque[tuple[str, int]] = deque()
         queue.append((method_fqn, 0))
 
+        gen_filter = " AND caller.generated = false" if exclude_generated else ""
+
         while queue:
             current_fqn, depth = queue.popleft()
             if depth >= max_depth:
                 continue
 
-            result = conn.execute(
+            cypher = (
                 "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
-                "WHERE callee.fqn = $fqn "
+                f"WHERE callee.fqn = $fqn{gen_filter} "
                 "MATCH (f:File) WHERE f.id = caller.file_id "
-                "RETURN caller.fqn AS fqn, f.path AS file_path",
-                {"fqn": current_fqn},
+                "RETURN caller.fqn AS fqn, f.path AS file_path"
             )
+            result = conn.execute(cypher, {"fqn": current_fqn})
             while result.has_next():
                 row = result.get_next()
                 caller_fqn: str = row[0]
@@ -556,6 +563,85 @@ def list_repos() -> list[dict]:
     except Exception as exc:
         log.error("list_repos(): %s", exc)
         return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# Tool 12: find_implementations
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_implementations(interface_fqn: str) -> list[dict]:
+    """Find all classes that directly implement the given interface (up to 10 hops via IMPLEMENTS).
+
+    Args:
+        interface_fqn: FQN of the interface, e.g. ``com.example.WalletService``.
+
+    Returns:
+        List of dicts with keys ``class_fqn``, ``class_name``, ``file_path``, ``repo_name``.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        result = conn.execute(
+            "MATCH (impl:Class)-[:IMPLEMENTS*1..10]->(iface:Class) "
+            "WHERE iface.fqn = $fqn "
+            "MATCH (f:File) WHERE f.id = impl.file_id "
+            "MATCH (r:Repo) WHERE r.id = impl.repo_id "
+            "RETURN impl.fqn AS class_fqn, impl.name AS class_name, "
+            "       f.path AS file_path, r.name AS repo_name",
+            {"fqn": interface_fqn},
+        )
+        return _rows(result, ["class_fqn", "class_name", "file_path", "repo_name"])
+    except Exception as exc:
+        log.error("find_implementations(%r): %s", interface_fqn, exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Tool 13: find_superclasses
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_superclasses(class_fqn: str, max_depth: int = 10) -> list[dict]:
+    """Walk the EXTENDS chain upward from the given class (BFS, max depth 10).
+
+    Returns:
+        List of dicts with keys ``class_fqn``, ``depth``, ``repo_name``.
+        Depth 1 = direct parent. Starting class not included.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    from collections import deque  # noqa: PLC0415
+    max_depth = min(max_depth, 10)
+    try:
+        visited: dict[str, tuple[int, str]] = {}
+        queue: deque[tuple[str, int]] = deque([(class_fqn, 0)])
+        while queue:
+            current_fqn, depth = queue.popleft()
+            if depth >= max_depth:
+                continue
+            result = conn.execute(
+                "MATCH (child:Class)-[:EXTENDS]->(parent:Class) "
+                "WHERE child.fqn = $fqn "
+                "MATCH (r:Repo) WHERE r.id = parent.repo_id "
+                "RETURN parent.fqn, r.name",
+                {"fqn": current_fqn},
+            )
+            while result.has_next():
+                row = result.get_next()
+                parent_fqn, parent_repo = row[0], row[1]
+                if parent_fqn not in visited:
+                    visited[parent_fqn] = (depth + 1, parent_repo)
+                    queue.append((parent_fqn, depth + 1))
+        return [
+            {"class_fqn": fqn, "depth": d, "repo_name": repo}
+            for fqn, (d, repo) in sorted(visited.items(), key=lambda kv: kv[1][0])
+        ]
+    except Exception as exc:
+        log.error("find_superclasses(%r): %s", class_fqn, exc)
+        return []
 
 
 # ---------------------------------------------------------------------------

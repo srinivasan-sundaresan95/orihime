@@ -517,10 +517,10 @@ class _DB:
         # ── Methods ───────────────────────────────────────────────────────
         r3 = self._conn.execute(
             "MATCH (c:Class)-[:CONTAINS_METHOD]->(m:Method) WHERE c.repo_id = $rid "
-            "RETURN m.id, m.name, m.fqn, c.id AS class_id",
+            "RETURN m.id, m.name, m.fqn, c.id AS class_id, m.generated",
             {"rid": repo_id},
         )
-        method_rows = self._rows(r3, ["id", "name", "fqn", "class_id"])
+        method_rows = self._rows(r3, ["id", "name", "fqn", "class_id", "generated"])
         method_ids = {row["id"] for row in method_rows}
         method_degree: dict[str, int] = {}
 
@@ -552,6 +552,7 @@ class _DB:
                 "degree": method_degree.get(row["id"], 0),
                 "parent_id": row["class_id"],
                 "group": _class_label(row["fqn"]),
+                "generated": bool(row.get("generated", False)),
             })
 
         # ── External dependency stubs (UNRESOLVED_CALL) ───────────────────
@@ -580,6 +581,26 @@ class _DB:
             pass  # old DB without callee_name — skip
 
         nodes.extend(ext_nodes.values())
+
+        # Inheritance edges
+        try:
+            r6 = self._conn.execute(
+                "MATCH (child:Class)-[:EXTENDS]->(parent:Class) WHERE child.repo_id = $rid RETURN child.id, parent.id",
+                {"rid": repo_id},
+            )
+            while r6.has_next():
+                a, b = r6.get_next()
+                edges.append({"from": a, "to": b, "weight": 1, "etype": "extends"})
+            r7 = self._conn.execute(
+                "MATCH (child:Class)-[:IMPLEMENTS]->(parent:Class) WHERE child.repo_id = $rid RETURN child.id, parent.id",
+                {"rid": repo_id},
+            )
+            while r7.has_next():
+                a, b = r7.get_next()
+                edges.append({"from": a, "to": b, "weight": 1, "etype": "implements"})
+        except Exception:
+            pass  # old DB without inheritance tables — degrade gracefully
+
         return {"nodes": nodes, "edges": edges}
 
     def endpoints(self) -> list[dict]:
@@ -775,6 +796,7 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
   <div id="filterToggles" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;"></div>
 
   <button id="fitBtn" style="padding:7px 12px;font-size:0.82rem;background:#1e2130;border:1px solid #2d3148;border-radius:8px;color:#94a3b8;cursor:pointer;" title="Fit graph to window">&#x26F6;</button>
+  <button id="inheritanceToggle" data-active="1" style="padding:7px 12px;font-size:0.82rem;background:#1e2130;border:1px solid #7c3aed;border-radius:8px;color:#a78bfa;cursor:pointer;" title="Toggle inheritance edges">Inheritance</button>
   <span id="graphStatus" style="color:#64748b;font-size:0.8rem;margin-left:4px;"></span>
 </div>
 
@@ -788,6 +810,7 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
       <div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4f46e5;margin-right:6px;vertical-align:middle;border:1px solid #6366f1;"></span>Class</div>
       <div><span style="display:inline-block;width:10px;height:10px;background:#1e3a5f;margin-right:6px;vertical-align:middle;border:1px solid #38bdf8;transform:rotate(45deg);"></span>Interface</div>
       <div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#92400e;margin-right:6px;vertical-align:middle;border:1px solid #f59e0b;"></span>Method</div>
+      <div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#92400e;margin-right:6px;vertical-align:middle;border:1px solid #f59e0b;opacity:0.4;"></span>Generated (Lombok)</div>
       <div><span style="display:inline-block;width:10px;height:10px;background:#3b0a0a;margin-right:6px;vertical-align:middle;border:1px solid #ef4444;"></span>External dep</div>
     </div>
     <div style="margin-top:14px;font-size:0.75rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px;">Packages</div>
@@ -796,6 +819,10 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
       Edge thickness = call count<br>
       Node size = out-degree<br>
       Click node → symbol detail
+    </div>
+    <div style="margin-top:10px;font-size:0.72rem;color:#475569;">
+      <div style="margin-bottom:4px;"><span style="display:inline-block;width:20px;border-top:2px dashed #7c3aed;margin-right:6px;vertical-align:middle;"></span>Extends</div>
+      <div><span style="display:inline-block;width:20px;border-top:2px dashed #0369a1;margin-right:6px;vertical-align:middle;"></span>Implements</div>
     </div>
   </div>
 </div>
@@ -816,6 +843,8 @@ let visNodes  = null;
 let visEdges  = null;
 let rawData   = null;           // full payload from server
 let hiddenKinds = new Set();    // kinds toggled OFF by the user
+let hiddenEdgeTypes = new Set();
+let showGenerated = false;
 
 // ── Colour palette ────────────────────────────────────────────────────────
 const KIND_COLOR = {{
@@ -874,7 +903,9 @@ function applyVisibility() {{
   if (!visNodes || !visEdges) return;
   const nodeUpdates = visNodes.getIds().map(id => {{
     const n = visNodes.get(id);
-    return {{ id, hidden: hiddenKinds.has(n.kind) }};
+    const hiddenByKind      = hiddenKinds.has(n.kind);
+    const hiddenByGenerated = (n.generated === true && !showGenerated);
+    return {{ id, hidden: hiddenByKind || hiddenByGenerated }};
   }});
   visNodes.update(nodeUpdates);
 
@@ -884,7 +915,7 @@ function applyVisibility() {{
   );
   const edgeUpdates = visEdges.getIds().map(id => {{
     const e = visEdges.get(id);
-    return {{ id, hidden: hiddenNodeIds.has(e.from) || hiddenNodeIds.has(e.to) }};
+    return {{ id, hidden: hiddenNodeIds.has(e.from) || hiddenNodeIds.has(e.to) || hiddenEdgeTypes.has(e.etype) }};
   }});
   visEdges.update(edgeUpdates);
 
@@ -925,6 +956,24 @@ function buildFilterToggles(kinds) {{
     }};
     panel.appendChild(btn);
   }});
+  const hasMethodNodes = rawData && rawData.nodes.some(n => n.kind === 'method');
+  if (hasMethodNodes) {{
+    const genBtn = document.createElement('button');
+    genBtn.id             = 'generatedToggle';
+    genBtn.textContent    = 'Generated';
+    genBtn.dataset.active = '0';
+    genBtn.style.cssText  = 'padding:4px 10px;font-size:0.78rem;border-radius:6px;'
+      + 'border:1px dashed #475569;background:transparent;color:#475569;cursor:pointer;font-weight:600;opacity:0.35;';
+    genBtn.onclick = () => {{
+      showGenerated = genBtn.dataset.active !== '1';
+      genBtn.dataset.active  = showGenerated ? '1' : '0';
+      genBtn.style.opacity   = showGenerated ? '1' : '0.35';
+      genBtn.style.borderColor = showGenerated ? '#f59e0b' : '#475569';
+      genBtn.style.color       = showGenerated ? '#f59e0b' : '#475569';
+      applyVisibility();
+    }};
+    panel.appendChild(genBtn);
+  }}
 }}
 
 function buildLegend(nodes) {{
@@ -947,19 +996,22 @@ function nodeVisual(n) {{
   const kind = n.kind || 'class';
   const col  = KIND_COLOR[kind] || KIND_COLOR.class;
   const isExt = kind === 'external';
-  const size  = isExt ? 10 : Math.max(10, Math.min(32, 10 + (n.degree || 0)));
+  const isGenerated = kind === 'method' && n.generated === true;
+  const size  = isExt ? 10 : isGenerated ? 6 : Math.max(10, Math.min(32, 10 + (n.degree || 0)));
   return {{
     id:    n.id,
     label: n.label,
     fqn:   n.fqn,
     kind,
+    generated: n.generated || false,
     shape: kind === 'interface' ? 'diamond' : (isExt ? 'square' : 'dot'),
     size,
     color: {{ background: col.bg, border: col.border,
               highlight: {{ background: '#fff', border: '#6366f1' }},
               hover:     {{ background: col.border, border: '#fff' }} }},
-    font:   {{ color: isExt ? '#94a3b8' : '#f1f5f9', size: isExt ? 9 : 11 }},
-    hidden: hiddenKinds.has(kind),
+    font:   {{ color: isGenerated ? '#64748b' : (isExt ? '#94a3b8' : '#f1f5f9'), size: isExt ? 9 : 11 }},
+    opacity: isGenerated ? 0.4 : 1.0,
+    hidden: hiddenKinds.has(kind) || (isGenerated && !showGenerated),
     group:  n.group || '',
   }};
 }}
@@ -969,17 +1021,21 @@ function edgeVisual(e, idx) {{
   // Differentiate edge types visually
   const edgeColor = e.etype === 'method_call' ? '#374151'
                   : e.etype === 'ext_call'    ? '#4c0519'
+                  : e.etype === 'extends'     ? '#7c3aed'
+                  : e.etype === 'implements'  ? '#0369a1'
                   : '#2d3148';
+  const isDashed = e.etype === 'extends' || e.etype === 'implements';
   return {{
     id:     `e${{idx}}`,
     from:   e.from,
     to:     e.to,
     etype:  e.etype,
     arrows: {{ to: {{ enabled: true, scaleFactor: 0.45 }} }},
-    color:  {{ color: edgeColor, highlight: '#818cf8', opacity: 0.75 }},
+    color:  {{ color: edgeColor, highlight: '#818cf8', opacity: isDashed ? 0.6 : 0.75 }},
     width:  Math.min(4, 0.8 + w * 0.25),
     smooth: {{ type: 'curvedCW', roundness: 0.12 }},
-    title:  `${{w}} call${{w > 1 ? 's' : ''}}`,
+    title:  isDashed ? e.etype : `${{w}} call${{w > 1 ? 's' : ''}}`,
+    dashes: isDashed,
     hidden: false,
   }};
 }}
@@ -994,6 +1050,8 @@ function loadGraph() {{
   legendPanel.style.display = 'none';
   if (network) {{ network.destroy(); network = null; visNodes = null; visEdges = null; }}
   hiddenKinds.clear();
+  hiddenEdgeTypes.clear();
+  showGenerated = false;
   rawData = null;
 
   fetch(`/api/graph?repo=${{encodeURIComponent(repo)}}`)
@@ -1060,6 +1118,22 @@ function loadGraph() {{
 // ── Wiring ────────────────────────────────────────────────────────────────
 document.getElementById('repoSelect').onchange = loadGraph;
 document.getElementById('fitBtn').onclick = () => network && network.fit({{ animation: true }});
+document.getElementById('inheritanceToggle').onclick = () => {{
+    const btn = document.getElementById('inheritanceToggle');
+    const active = btn.dataset.active === '1';
+    if (active) {{
+        hiddenEdgeTypes.add('extends');
+        hiddenEdgeTypes.add('implements');
+        btn.style.opacity = '0.35';
+        btn.dataset.active = '0';
+    }} else {{
+        hiddenEdgeTypes.delete('extends');
+        hiddenEdgeTypes.delete('implements');
+        btn.style.opacity = '1';
+        btn.dataset.active = '1';
+    }}
+    applyVisibility();
+}};
 document.addEventListener('mousemove', e => {{
   tooltip.style.left = (e.clientX + 16) + 'px';
   tooltip.style.top  = (e.clientY - 8)  + 'px';

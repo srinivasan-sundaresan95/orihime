@@ -1,6 +1,7 @@
 """Java language extractor for the Indra code knowledge graph."""
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -358,21 +359,121 @@ _SPRING_COMPONENT_ANNOTATIONS: frozenset[str] = frozenset(
     {"Service", "Component", "Repository", "Controller", "RestController"}
 )
 
+_LOMBOK_CLASS_ANNOTATIONS: frozenset[str] = frozenset({
+    "Data", "Value", "Builder", "Getter", "Setter", "EqualsAndHashCode", "ToString"
+})
 
-def _extract_impl_map(root, source_bytes: bytes, package: str) -> dict[str, str]:
-    # Build import map: simple_name → fully-qualified name
+_LOMBOK_GENERATED_NAMES: frozenset[str] = frozenset({
+    "equals", "hashCode", "toString", "canEqual", "builder", "build"
+})
+
+_LOMBOK_GETTER_RE = re.compile(r'^(get|is)[A-Z]')
+_LOMBOK_SETTER_RE = re.compile(r'^set[A-Z]')
+
+
+def _is_lombok_generated(method_name: str, class_annotations: list[str]) -> bool:
+    """Return True if method_name is likely Lombok-generated given the class annotations."""
+    if not _LOMBOK_CLASS_ANNOTATIONS.intersection(class_annotations):
+        return False
+    if method_name in _LOMBOK_GENERATED_NAMES:
+        return True
+    if _LOMBOK_GETTER_RE.match(method_name):
+        return True
+    if _LOMBOK_SETTER_RE.match(method_name):
+        return True
+    return False
+
+
+def _build_import_map(root, source_bytes: bytes) -> dict[str, str]:
+    """Return simple_name → fqn from all import declarations under root."""
     import_map: dict[str, str] = {}
     for child in root.children:
         if child.type == "import_declaration":
-            # import_declaration text is like "import com.example.Foo ;"
-            # The scoped_identifier/identifier child holds the FQN
             for cc in child.children:
                 if cc.type in ("scoped_identifier", "identifier"):
                     fqn_text = _text(cc, source_bytes)
-                    # simple name is the last segment
                     simple = fqn_text.rsplit(".", 1)[-1]
                     import_map[simple] = fqn_text
                     break
+    return import_map
+
+
+def _walk_excluding_type_args(node):
+    """Like _walk_all but does not descend into type_arguments nodes."""
+    yield node
+    for child in node.children:
+        if child.type != "type_arguments":
+            yield from _walk_excluding_type_args(child)
+
+
+def _extract_inheritance(
+    node,
+    source_bytes: bytes,
+    class_fqn: str,
+    class_id: str,
+    import_map: dict[str, str],
+    package: str,
+) -> list[dict]:
+    """Extract EXTENDS/IMPLEMENTS edges for a single class or interface declaration.
+
+    Java AST confirmed field names:
+    - class_declaration: "superclass" field → EXTENDS; "interfaces" field → IMPLEMENTS
+      NOTE: tree-sitter-java uses "interfaces" (NOT "super_interfaces") for the implements clause.
+    - interface_declaration: "extends_interfaces" field → IMPLEMENTS
+
+    FQN resolution: import_map.get(simple, f"{package}.{simple}" if package else simple)
+    Self-loop guard: skip if parent_fqn == class_fqn
+    Type params: use _walk_excluding_type_args to avoid collecting type params as supertypes
+    """
+    edges = []
+    node_type = node.type  # "class_declaration" or "interface_declaration"
+
+    def _resolve(simple: str) -> str:
+        return import_map.get(simple, f"{package}.{simple}" if package else simple)
+
+    def _collect_type_identifiers(clause_node) -> list[str]:
+        return [
+            _text(n, source_bytes)
+            for n in _walk_excluding_type_args(clause_node)
+            if n.type == "type_identifier"
+        ]
+
+    if node_type == "class_declaration":
+        # superclass → EXTENDS
+        superclass_node = node.child_by_field_name("superclass")
+        if superclass_node is not None:
+            for simple in _collect_type_identifiers(superclass_node):
+                parent_fqn = _resolve(simple)
+                if parent_fqn != class_fqn:
+                    edges.append({"child_id": class_id, "parent_fqn": parent_fqn, "edge_type": "EXTENDS"})
+                break  # only one superclass
+
+        # interfaces → IMPLEMENTS
+        interfaces_node = node.child_by_field_name("interfaces")
+        if interfaces_node is not None:
+            for simple in _collect_type_identifiers(interfaces_node):
+                parent_fqn = _resolve(simple)
+                if parent_fqn != class_fqn:
+                    edges.append({"child_id": class_id, "parent_fqn": parent_fqn, "edge_type": "IMPLEMENTS"})
+
+    elif node_type == "interface_declaration":
+        # extends_interfaces → IMPLEMENTS (interfaces extend other interfaces)
+        # NOTE: tree-sitter-java exposes this as a child node by *type*, not as a named field.
+        extends_node = node.child_by_field_name("extends_interfaces") or next(
+            (c for c in node.children if c.type == "extends_interfaces"), None
+        )
+        if extends_node is not None:
+            for simple in _collect_type_identifiers(extends_node):
+                parent_fqn = _resolve(simple)
+                if parent_fqn != class_fqn:
+                    edges.append({"child_id": class_id, "parent_fqn": parent_fqn, "edge_type": "IMPLEMENTS"})
+
+    return edges
+
+
+def _extract_impl_map(root, source_bytes: bytes, package: str) -> dict[str, str]:
+    # Build import map: simple_name → fully-qualified name
+    import_map: dict[str, str] = _build_import_map(root, source_bytes)
 
     result: dict[str, str] = {}
 
@@ -481,17 +582,20 @@ class JavaExtractor:
                         _extract_static_final_strings(body_node, class_name, source_bytes)
                     )
 
+        # Build import map once for the whole file (used by _extract_inheritance)
+        import_map = _build_import_map(root, source_bytes)
+
         # --- Pass 2: extract classes/methods/endpoints with resolved constants ---
         for node in _walk_all(root):
             if node.type == "class_declaration":
                 self._process_class(
                     node, source_bytes, file_id, repo_id, package, result,
-                    is_interface=False, constant_index=constant_index
+                    is_interface=False, constant_index=constant_index, import_map=import_map
                 )
             elif node.type == "interface_declaration":
                 self._process_class(
                     node, source_bytes, file_id, repo_id, package, result,
-                    is_interface=True, constant_index=constant_index
+                    is_interface=True, constant_index=constant_index, import_map=import_map
                 )
 
     def _process_class(
@@ -504,6 +608,7 @@ class JavaExtractor:
         result: ExtractResult,
         is_interface: bool,
         constant_index: "dict[str, str] | None" = None,
+        import_map: "dict[str, str] | None" = None,
     ) -> None:
         # Get class name — identifier child
         name_node = class_node.child_by_field_name("name")
@@ -544,6 +649,12 @@ class JavaExtractor:
             }
         )
 
+        # Extract EXTENDS/IMPLEMENTS inheritance edges
+        inheritance = _extract_inheritance(
+            class_node, source_bytes, fqn, class_id, import_map or {}, package
+        )
+        result.inheritance_edges.extend(inheritance)
+
         # Find class body → process methods
         body_node = class_node.child_by_field_name("body")
         if body_node is None:
@@ -559,6 +670,7 @@ class JavaExtractor:
                 class_path_prefix,
                 result,
                 constant_index=constant_index,
+                class_annotations=annotations,
             )
 
     def _process_methods(
@@ -572,6 +684,7 @@ class JavaExtractor:
         class_path_prefix: str,
         result: ExtractResult,
         constant_index: "dict[str, str] | None" = None,
+        class_annotations: "list[str] | None" = None,
     ) -> None:
         for child in body_node.children:
             if child.type == "method_declaration":
@@ -585,6 +698,7 @@ class JavaExtractor:
                     class_path_prefix,
                     result,
                     constant_index=constant_index,
+                    class_annotations=class_annotations,
                 )
 
     def _process_method(
@@ -598,6 +712,7 @@ class JavaExtractor:
         class_path_prefix: str,
         result: ExtractResult,
         constant_index: "dict[str, str] | None" = None,
+        class_annotations: "list[str] | None" = None,
     ) -> None:
         name_node = method_node.child_by_field_name("name")
         if name_node is None:
@@ -612,6 +727,8 @@ class JavaExtractor:
         modifiers_node = _find_first_child_of_type(method_node, "modifiers")
         annotations = _collect_annotations(modifiers_node, source_bytes)
 
+        generated = _is_lombok_generated(method_name, class_annotations or [])
+
         method_id = str(uuid.uuid4())
         result.methods.append(
             {
@@ -624,6 +741,7 @@ class JavaExtractor:
                 "line_start": line_start,
                 "is_suspend": False,
                 "annotations": annotations,
+                "generated": generated,
             }
         )
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import kuzu
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 
 _NODE_TABLES = [
     """CREATE NODE TABLE Repo(
@@ -38,6 +38,7 @@ _NODE_TABLES = [
         line_start INT64,
         is_suspend BOOLEAN,
         annotations STRING[],
+        generated BOOLEAN,
         PRIMARY KEY(id)
     )""",
     """CREATE NODE TABLE Endpoint(
@@ -68,6 +69,8 @@ _REL_TABLES = [
     "CREATE REL TABLE CONTAINS_METHOD(FROM Class TO Method)",
     "CREATE REL TABLE EXPOSES(FROM Repo TO Endpoint)",
     "CREATE REL TABLE DEPENDS_ON(FROM Repo TO Repo)",
+    "CREATE REL TABLE EXTENDS(FROM Class TO Class)",
+    "CREATE REL TABLE IMPLEMENTS(FROM Class TO Class)",
 ]
 
 _DROP_REL_TABLES = [
@@ -78,6 +81,8 @@ _DROP_REL_TABLES = [
     "CONTAINS_METHOD",
     "EXPOSES",
     "DEPENDS_ON",
+    "EXTENDS",
+    "IMPLEMENTS",
 ]
 
 _DROP_NODE_TABLES = [

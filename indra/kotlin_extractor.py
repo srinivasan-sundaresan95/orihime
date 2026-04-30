@@ -1,6 +1,7 @@
 """Kotlin tree-sitter extractor for the Indra code knowledge graph."""
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 
@@ -31,6 +32,11 @@ _CHAIN_METHOD_TO_HTTP: dict[str, str] = {
 }
 
 _REST_CLIENT_ROOTS = {"restClient", "webClient", "restTemplate", "RestClient", "WebClient", "RestTemplate"}
+
+_KOTLIN_DATA_GENERATED_NAMES: frozenset[str] = frozenset({
+    "copy", "toString", "hashCode", "equals"
+})
+_KOTLIN_COMPONENT_RE = re.compile(r'^component\d+$')
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +119,27 @@ def _is_suspend(modifiers_node, src: bytes) -> bool:
     return False
 
 
+def _is_data_class(modifiers_node, src: bytes) -> bool:
+    """Return True if the modifiers include the 'data' keyword modifier."""
+    if modifiers_node is None:
+        return False
+    for child in modifiers_node.children:
+        if child.type in ("class_modifier", "modifier") and _node_text(child, src).strip() == "data":
+            return True
+    return False
+
+
+def _is_kotlin_data_generated(method_name: str, is_data_class: bool) -> bool:
+    """Return True if method_name is compiler-generated for a Kotlin data class."""
+    if not is_data_class:
+        return False
+    if method_name in _KOTLIN_DATA_GENERATED_NAMES:
+        return True
+    if _KOTLIN_COMPONENT_RE.match(method_name):
+        return True
+    return False
+
+
 def _package_name(root_node, src: bytes) -> str:
     """Extract package name from package_header node."""
     pkg_header = _child_by_type(root_node, "package_header")
@@ -130,6 +157,71 @@ def _package_name(root_node, src: bytes) -> str:
 
 
 from .path_utils import compile_path_regex as _path_regex
+
+
+# ---------------------------------------------------------------------------
+# Inheritance extraction
+# ---------------------------------------------------------------------------
+
+def _extract_kotlin_supertypes(
+    class_node,
+    source_bytes: bytes,
+    class_fqn: str,
+    class_id: str,
+    package: str,
+) -> list[dict]:
+    """Extract EXTENDS/IMPLEMENTS edges for a Kotlin class_declaration or object_declaration.
+
+    delegation_specifiers children:
+    - delegation_specifier with constructor_invocation → EXTENDS
+    - delegation_specifier with user_type directly → IMPLEMENTS
+
+    FQN: f"{package}.{simple}" if package else simple.
+    NOT called for interface_declaration or companion_object.
+    """
+    edges = []
+    delegation_specs = None
+    for child in class_node.children:
+        if child.type == "delegation_specifiers":
+            delegation_specs = child
+            break
+    if delegation_specs is None:
+        return []
+
+    def _resolve(simple: str) -> str:
+        return f"{package}.{simple}" if package else simple
+
+    for spec in delegation_specs.children:
+        if spec.type != "delegation_specifier":
+            continue
+        edge_type = None
+        simple_name = None
+        for child in spec.children:
+            if child.type == "constructor_invocation":
+                # class extension: BaseService()
+                edge_type = "EXTENDS"
+                for cc in child.children:
+                    if cc.type == "user_type":
+                        for id_node in cc.children:
+                            if id_node.type == "identifier":
+                                simple_name = source_bytes[id_node.start_byte:id_node.end_byte].decode("utf-8", errors="replace")
+                                break
+                        break
+                break
+            elif child.type == "user_type":
+                # interface implementation
+                edge_type = "IMPLEMENTS"
+                for id_node in child.children:
+                    if id_node.type == "identifier":
+                        simple_name = source_bytes[id_node.start_byte:id_node.end_byte].decode("utf-8", errors="replace")
+                        break
+                break
+        if simple_name and edge_type:
+            parent_fqn = _resolve(simple_name)
+            if parent_fqn != class_fqn:
+                edges.append({"child_id": class_id, "parent_fqn": parent_fqn, "edge_type": edge_type})
+
+    return edges
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +343,7 @@ class KotlinExtractor:
         methods: list[dict] = []
         endpoints: list[dict] = []
         rest_calls: list[dict] = []
+        inheritance_edges: list[dict] = []
 
         package = _package_name(root, src)
 
@@ -258,6 +351,7 @@ class KotlinExtractor:
         for class_node in _iter_class_nodes(root):
             modifiers = _child_by_type(class_node, "modifiers")
             class_annotations = _collect_annotations(modifiers, src)
+            data_class = _is_data_class(modifiers, src)
 
             class_name = _resolve_class_name(class_node, src)
             if class_name is None:
@@ -276,6 +370,11 @@ class KotlinExtractor:
                 "is_interface": is_interface,
                 "annotations": class_annotations,
             })
+
+            # Extract EXTENDS/IMPLEMENTS inheritance edges (class and object only)
+            if class_node.type in ("class_declaration", "object_declaration"):
+                inh = _extract_kotlin_supertypes(class_node, src, fqn, class_id, package)
+                inheritance_edges.extend(inh)
 
             # Class-level @RequestMapping prefix
             class_prefix = ""
@@ -304,6 +403,7 @@ class KotlinExtractor:
 
                 is_suspend = _is_suspend(fn_modifiers, src)
                 line_start = fn_node.start_point[0] + 1  # 1-based
+                generated = _is_kotlin_data_generated(fn_name, data_class)
 
                 method_id = str(uuid.uuid4())
                 methods.append({
@@ -316,6 +416,7 @@ class KotlinExtractor:
                     "line_start": line_start,
                     "is_suspend": is_suspend,
                     "annotations": fn_annotations,
+                    "generated": generated,
                 })
 
                 # Detect endpoint annotations
@@ -383,6 +484,7 @@ class KotlinExtractor:
                     "line_start": line_start,
                     "is_suspend": is_suspend,
                     "annotations": fn_annotations,
+                    "generated": False,
                 })
 
                 # Detect RestClient / WebClient calls in top-level function body
@@ -396,6 +498,7 @@ class KotlinExtractor:
             methods=methods,
             endpoints=endpoints,
             rest_calls=rest_calls,
+            inheritance_edges=inheritance_edges,
         )
 
 
