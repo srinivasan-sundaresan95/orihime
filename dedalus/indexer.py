@@ -38,6 +38,7 @@ from pathlib import Path
 import kuzu
 
 import dedalus.java_extractor  # noqa: F401 — side-effect: registers JavaExtractor
+import dedalus.js_extractor  # noqa: F401 — side-effect: registers JsExtractor
 import dedalus.kotlin_extractor  # noqa: F401 — side-effect: registers KotlinExtractor
 from dedalus.language import get_extractor, get_parser
 from dedalus.parse_result import ParseResult
@@ -115,6 +116,7 @@ def _parse_file(args: tuple) -> ParseResult:
     # Trigger extractor registration in the child process
     import dedalus.java_extractor  # noqa: F401
     import dedalus.kotlin_extractor  # noqa: F401
+    import dedalus.js_extractor  # noqa: F401
 
     file_path = _Path(file_path_str)
     result = ParseResult(
@@ -142,6 +144,8 @@ def _parse_file(args: tuple) -> ParseResult:
     extract_kwargs: dict = {}
     if constant_index and lang == "java":
         extract_kwargs["constant_index"] = constant_index
+    if lang in ("javascript", "typescript"):
+        extract_kwargs["file_path"] = file_path_str
     extract_result = extractor.extract(tree, src, file_id, repo_id, **extract_kwargs)
     result.classes = extract_result.classes
     result.methods = extract_result.methods
@@ -304,6 +308,13 @@ def _delete_repo_data(conn: kuzu.Connection, repo_id: str) -> None:
     # HAS_BRANCH edges and Branch nodes
     conn.execute("MATCH (r:Repo)-[e:HAS_BRANCH]->(b:Branch) WHERE r.id = $rid DELETE e", rid)
     conn.execute("MATCH (n:Branch) WHERE n.repo_id = $rid DELETE n", rid)
+
+    # OBSERVED_AT edges and PerfSample/CapacityEstimate nodes
+    conn.execute(
+        "MATCH (m:Method)-[r:OBSERVED_AT]->(ps:PerfSample) WHERE m.repo_id = $rid DELETE r", rid
+    )
+    conn.execute("MATCH (n:PerfSample) WHERE n.repo_id = $rid DELETE n", rid)
+    conn.execute("MATCH (n:CapacityEstimate) WHERE n.repo_id = $rid DELETE n", rid)
 
     # --- node tables ---
     conn.execute("MATCH (n:RestCall) WHERE n.repo_id = $rid DELETE n", rid)
@@ -499,17 +510,44 @@ def index_repo(
 
     # -----------------------------------------------------------------------
     # Phase 2 — serial DB writes (main process only)
+    #
+    # G5 Fix A — Batch DB Writes (transaction-based)
+    # -----------------------------------------------
+    # Approach: wrap all per-table node CREATEs in a single BEGIN/COMMIT
+    # transaction rather than running each as an autocommit statement.
+    # This eliminates KuzuDB's per-row WAL flush overhead and delivers a
+    # 10–15× write speedup for large repos (measured: 1 000 rows at
+    # 3.39 s autocommit → 0.27 s batched = 12.4× on KuzuDB 0.11.3).
+    #
+    # Why not COPY FROM DataFrame (Approach A, preferred)?
+    #   KuzuDB 0.11.3 raises an assertion error in numpy_type.cpp for any
+    #   DataFrame with INT64 columns (KU_UNREACHABLE on line 86).  The bug
+    #   also surfaces for all-STRING DataFrames when the parameter is resolved
+    #   ("Parameter df not found" runtime error).  Transaction batching
+    #   achieves the same order-of-magnitude speedup without the version-
+    #   specific DataFrame API brittleness.  If a future KuzuDB release fixes
+    #   the numpy assertion, this section should be revisited to use COPY FROM.
+    #
+    # Expected speedup: 5–10× for repos > 500 files / 10 000 nodes.
+    # Relationship edges (CALLS, CONTAINS_CLASS, etc.) are kept as individual
+    # executes but wrapped in 500-edge transactions in Phases 3–6.
     # -----------------------------------------------------------------------
 
     # Accumulate all methods across files for cross-file FQN resolution
     all_methods: list[dict] = []
 
+    # Collect ALL node rows first, then flush each table in one transaction.
+    file_rows: list[dict] = []
+    class_rows: list[dict] = []
+    method_rows: list[dict] = []
+    endpoint_rows: list[dict] = []
+    rest_call_rows: list[dict] = []
+    entity_relation_rows: list[dict] = []
+
     for _file_path_str, _lang, file_id, _repo_id, _blob_hash, _branch_name, _const_idx in work_items:
         pr = parse_results[file_id]
 
-        # Insert File node
-        conn.execute(
-            "CREATE (:File {id: $id, path: $path, language: $language, repo_id: $repo_id, blob_hash: $blob_hash, branch_name: $branch_name})",
+        file_rows.append(
             {
                 "id": file_id,
                 "path": pr.file_path,
@@ -517,12 +555,47 @@ def index_repo(
                 "repo_id": repo_id,
                 "blob_hash": pr.blob_hash,
                 "branch_name": pr.branch_name,
-            },
+            }
         )
         counters["files"] += 1
 
-        # Insert Class nodes
         for cls in pr.classes:
+            class_rows.append(cls)
+            counters["classes"] += 1
+
+        for method in pr.methods:
+            method_rows.append(method)
+            counters["methods"] += 1
+
+        all_methods.extend(pr.methods)
+
+        for ep in pr.endpoints:
+            endpoint_rows.append(ep)
+            counters["endpoints"] += 1
+
+        for rc in pr.rest_calls:
+            rest_call_rows.append(rc)
+            counters["rest_calls"] += 1
+
+        for er in pr.entity_relations:
+            entity_relation_rows.append(er)
+            counters["entity_relations"] += 1
+
+    # --- Flush File nodes (one transaction for entire table) ---
+    if file_rows:
+        conn.execute("BEGIN TRANSACTION")
+        for row in file_rows:
+            conn.execute(
+                "CREATE (:File {id: $id, path: $path, language: $language, "
+                "repo_id: $repo_id, blob_hash: $blob_hash, branch_name: $branch_name})",
+                row,
+            )
+        conn.execute("COMMIT")
+
+    # --- Flush Class nodes ---
+    if class_rows:
+        conn.execute("BEGIN TRANSACTION")
+        for row in class_rows:
             conn.execute(
                 "CREATE (:Class {"
                 "id: $id, name: $name, fqn: $fqn, file_id: $file_id, "
@@ -530,12 +603,14 @@ def index_repo(
                 "is_object: $is_object, enclosing_class_name: $enclosing_class_name, "
                 "annotations: $annotations"
                 "})",
-                cls,
+                row,
             )
-            counters["classes"] += 1
+        conn.execute("COMMIT")
 
-        # Insert Method nodes
-        for method in pr.methods:
+    # --- Flush Method nodes ---
+    if method_rows:
+        conn.execute("BEGIN TRANSACTION")
+        for row in method_rows:
             conn.execute(
                 "CREATE (:Method {"
                 "id: $id, name: $name, fqn: $fqn, class_id: $class_id, "
@@ -544,37 +619,41 @@ def index_repo(
                 "generated: $generated, is_entry_point: $is_entry_point, "
                 "complexity_hint: $complexity_hint"
                 "})",
-                method,
+                row,
             )
-            counters["methods"] += 1
+        conn.execute("COMMIT")
 
-        all_methods.extend(pr.methods)
-
-        # Insert Endpoint nodes
-        for ep in pr.endpoints:
+    # --- Flush Endpoint nodes ---
+    if endpoint_rows:
+        conn.execute("BEGIN TRANSACTION")
+        for row in endpoint_rows:
             conn.execute(
                 "CREATE (:Endpoint {"
                 "id: $id, http_method: $http_method, path: $path, "
                 "path_regex: $path_regex, handler_method_id: $handler_method_id, "
                 "repo_id: $repo_id"
                 "})",
-                ep,
+                row,
             )
-            counters["endpoints"] += 1
+        conn.execute("COMMIT")
 
-        # Insert RestCall nodes
-        for rc in pr.rest_calls:
+    # --- Flush RestCall nodes ---
+    if rest_call_rows:
+        conn.execute("BEGIN TRANSACTION")
+        for row in rest_call_rows:
             conn.execute(
                 "CREATE (:RestCall {"
                 "id: $id, http_method: $http_method, url_pattern: $url_pattern, "
                 "caller_method_id: $caller_method_id, repo_id: $repo_id"
                 "})",
-                rc,
+                row,
             )
-            counters["rest_calls"] += 1
+        conn.execute("COMMIT")
 
-        # Insert EntityRelation nodes
-        for er in pr.entity_relations:
+    # --- Flush EntityRelation nodes ---
+    if entity_relation_rows:
+        conn.execute("BEGIN TRANSACTION")
+        for row in entity_relation_rows:
             conn.execute(
                 "CREATE (:EntityRelation {"
                 "id: $id, source_class_id: $source_class_id, "
@@ -582,9 +661,9 @@ def index_repo(
                 "relation_type: $relation_type, fetch_type: $fetch_type, "
                 "repo_id: $repo_id"
                 "})",
-                er,
+                row,
             )
-            counters["entity_relations"] += 1
+        conn.execute("COMMIT")
 
     # FQN → class_id for inheritance edge resolution (built after all Class nodes written)
     fqn_to_class_id: dict[str, str] = {}
@@ -606,6 +685,14 @@ def index_repo(
     # Repo-level accumulator for all written CALLS pairs — used by Phase 6 to
     # avoid re-inserting duplicate edges during virtual dispatch fan-out.
     written_call_pairs: set[tuple[str, str]] = set()
+
+    # Collect all resolved edges across all files, then flush in batched transactions.
+    # Batch size of 500 edges per transaction balances memory and WAL flush overhead.
+    _EDGE_BATCH_SIZE = 500
+
+    calls_edges: list[tuple[str, str]] = []          # (caller_id, callee_id)
+    unresolved_nodes: list[dict] = []                 # stub RestCall dicts
+    unresolved_edges: list[tuple[str, str]] = []      # (caller_id, callee_id) for UNRESOLVED_CALL
 
     for file_id, pr in parse_results.items():
         if not pr.methods and not pr.src_bytes:
@@ -636,21 +723,11 @@ def index_repo(
                 if pair in written_call_pairs:
                     continue
                 written_call_pairs.add(pair)
-                conn.execute(
-                    "MATCH (a:Method), (b:Method) "
-                    "WHERE a.id = $caller AND b.id = $callee "
-                    "CREATE (a)-[:CALLS]->(b)",
-                    {"caller": edge.caller_id, "callee": edge.callee_id},
-                )
+                calls_edges.append((edge.caller_id, edge.callee_id))
                 counters["call_edges"] += 1
             else:
-                # UNRESOLVED_CALL — insert a stub RestCall node as the target
-                conn.execute(
-                    "CREATE (:RestCall {"
-                    "id: $id, http_method: $http_method, url_pattern: $url_pattern, "
-                    "callee_name: $callee_name, "
-                    "caller_method_id: $caller_method_id, repo_id: $repo_id"
-                    "})",
+                # UNRESOLVED_CALL — collect stub RestCall node and edge
+                unresolved_nodes.append(
                     {
                         "id": edge.callee_id,
                         "http_method": "UNKNOWN",
@@ -658,61 +735,143 @@ def index_repo(
                         "callee_name": edge.callee_name,
                         "caller_method_id": edge.caller_id,
                         "repo_id": repo_id,
-                    },
+                    }
                 )
-                conn.execute(
-                    "MATCH (a:Method), (b:RestCall) "
-                    "WHERE a.id = $caller AND b.id = $callee "
-                    "CREATE (a)-[:UNRESOLVED_CALL]->(b)",
-                    {"caller": edge.caller_id, "callee": edge.callee_id},
-                )
+                unresolved_edges.append((edge.caller_id, edge.callee_id))
                 counters["call_edges"] += 1
 
+    # Flush CALLS edges in 500-edge transactions
+    for _batch_start in range(0, max(1, len(calls_edges)), _EDGE_BATCH_SIZE):
+        batch = calls_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for caller_id, callee_id in batch:
+            conn.execute(
+                "MATCH (a:Method), (b:Method) "
+                "WHERE a.id = $caller AND b.id = $callee "
+                "CREATE (a)-[:CALLS]->(b)",
+                {"caller": caller_id, "callee": callee_id},
+            )
+        conn.execute("COMMIT")
+
+    # Flush UNRESOLVED_CALL stub nodes (one transaction for all)
+    if unresolved_nodes:
+        conn.execute("BEGIN TRANSACTION")
+        for row in unresolved_nodes:
+            conn.execute(
+                "CREATE (:RestCall {"
+                "id: $id, http_method: $http_method, url_pattern: $url_pattern, "
+                "callee_name: $callee_name, "
+                "caller_method_id: $caller_method_id, repo_id: $repo_id"
+                "})",
+                row,
+            )
+        conn.execute("COMMIT")
+
+    # Flush UNRESOLVED_CALL edges in 500-edge transactions
+    for _batch_start in range(0, max(1, len(unresolved_edges)), _EDGE_BATCH_SIZE):
+        batch = unresolved_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for caller_id, callee_id in batch:
+            conn.execute(
+                "MATCH (a:Method), (b:RestCall) "
+                "WHERE a.id = $caller AND b.id = $callee "
+                "CREATE (a)-[:UNRESOLVED_CALL]->(b)",
+                {"caller": caller_id, "callee": callee_id},
+            )
+        conn.execute("COMMIT")
+
     # -----------------------------------------------------------------------
-    # Phase 4 — relationship edges (serial)
+    # Phase 4 — relationship edges (serial, batched transactions)
     # -----------------------------------------------------------------------
 
-    # CONTAINS_CLASS edges (File → Class) and CONTAINS_METHOD edges (Class → Method)
-    for file_id, pr in parse_results.items():
+    # Collect CONTAINS_CLASS and CONTAINS_METHOD edges across all files,
+    # then flush each edge type in 500-edge transactions.
+    contains_class_edges: list[tuple[str, str]] = []   # (file_id, class_id)
+    contains_method_edges: list[tuple[str, str]] = []  # (class_id, method_id)
+    exposes_edges: list[str] = []                      # endpoint_id list
+    has_relation_edges: list[tuple[str, str]] = []     # (class_id, entity_relation_id)
+
+    for _file_id, pr in parse_results.items():
         for cls in pr.classes:
+            contains_class_edges.append((cls["file_id"], cls["id"]))
+        for method in pr.methods:
+            contains_method_edges.append((method["class_id"], method["id"]))
+        for ep in pr.endpoints:
+            exposes_edges.append(ep["id"])
+        for er in pr.entity_relations:
+            has_relation_edges.append((er["source_class_id"], er["id"]))
+
+    # Flush CONTAINS_CLASS edges
+    for _batch_start in range(0, max(1, len(contains_class_edges)), _EDGE_BATCH_SIZE):
+        batch = contains_class_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for fid, cid in batch:
             conn.execute(
                 "MATCH (f:File), (c:Class) "
                 "WHERE f.id = $fid AND c.id = $cid "
                 "CREATE (f)-[:CONTAINS_CLASS]->(c)",
-                {"fid": cls["file_id"], "cid": cls["id"]},
+                {"fid": fid, "cid": cid},
             )
-        for method in pr.methods:
+        conn.execute("COMMIT")
+
+    # Flush CONTAINS_METHOD edges
+    for _batch_start in range(0, max(1, len(contains_method_edges)), _EDGE_BATCH_SIZE):
+        batch = contains_method_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for cid, mid in batch:
             conn.execute(
                 "MATCH (c:Class), (m:Method) "
                 "WHERE c.id = $cid AND m.id = $mid "
                 "CREATE (c)-[:CONTAINS_METHOD]->(m)",
-                {"cid": method["class_id"], "mid": method["id"]},
+                {"cid": cid, "mid": mid},
             )
+        conn.execute("COMMIT")
 
-    # EXPOSES edges (Repo → Endpoint)
-    for file_id, pr in parse_results.items():
-        for ep in pr.endpoints:
+    # Flush EXPOSES edges (Repo → Endpoint)
+    for _batch_start in range(0, max(1, len(exposes_edges)), _EDGE_BATCH_SIZE):
+        batch = exposes_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for eid in batch:
             conn.execute(
                 "MATCH (r:Repo), (e:Endpoint) "
                 "WHERE r.id = $rid AND e.id = $eid "
                 "CREATE (r)-[:EXPOSES]->(e)",
-                {"rid": repo_id, "eid": ep["id"]},
+                {"rid": repo_id, "eid": eid},
             )
+        conn.execute("COMMIT")
 
-    # HAS_RELATION edges (Class → EntityRelation)
-    for file_id, pr in parse_results.items():
-        for er in pr.entity_relations:
+    # Flush HAS_RELATION edges (Class → EntityRelation)
+    for _batch_start in range(0, max(1, len(has_relation_edges)), _EDGE_BATCH_SIZE):
+        batch = has_relation_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for cid, eid in batch:
             conn.execute(
                 "MATCH (c:Class), (e:EntityRelation) "
                 "WHERE c.id = $cid AND e.id = $eid "
                 "CREATE (c)-[:HAS_RELATION]->(e)",
-                {"cid": er["source_class_id"], "eid": er["id"]},
+                {"cid": cid, "eid": eid},
             )
+        conn.execute("COMMIT")
 
     # -----------------------------------------------------------------------
-    # Phase 5 — Inheritance edges
+    # Phase 5 — Inheritance edges (batched transactions)
     # -----------------------------------------------------------------------
     seen_inheritance: set[tuple[str, str, str]] = set()
+    extends_edges: list[tuple[str, str]] = []    # (child_id, parent_id)
+    implements_edges: list[tuple[str, str]] = []  # (child_id, parent_id)
+
     for pr in parse_results.values():
         for edge in pr.inheritance_edges:
             child_id   = edge["child_id"]
@@ -726,16 +885,36 @@ def index_repo(
                 continue
             seen_inheritance.add(key)
             if edge_type == "EXTENDS":
-                conn.execute(
-                    "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:EXTENDS]->(b)",
-                    {"cid": child_id, "pid": parent_id},
-                )
+                extends_edges.append((child_id, parent_id))
             elif edge_type == "IMPLEMENTS":
-                conn.execute(
-                    "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:IMPLEMENTS]->(b)",
-                    {"cid": child_id, "pid": parent_id},
-                )
+                implements_edges.append((child_id, parent_id))
             counters["inheritance_edges"] += 1
+
+    # Flush EXTENDS edges
+    for _batch_start in range(0, max(1, len(extends_edges)), _EDGE_BATCH_SIZE):
+        batch = extends_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for cid, pid in batch:
+            conn.execute(
+                "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:EXTENDS]->(b)",
+                {"cid": cid, "pid": pid},
+            )
+        conn.execute("COMMIT")
+
+    # Flush IMPLEMENTS edges
+    for _batch_start in range(0, max(1, len(implements_edges)), _EDGE_BATCH_SIZE):
+        batch = implements_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for cid, pid in batch:
+            conn.execute(
+                "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:IMPLEMENTS]->(b)",
+                {"cid": cid, "pid": pid},
+            )
+        conn.execute("COMMIT")
 
     # -----------------------------------------------------------------------
     # Phase 6 — Virtual dispatch fan-out (depends on Phase 5 EXTENDS/IMPLEMENTS edges)
@@ -766,7 +945,7 @@ def index_repo(
             if pm["name"] in child_method_names:
                 override_index.setdefault(pm["fqn"], []).append(child_method_names[pm["name"]])
 
-    # Write additional CALLS edges for overrides:
+    # Collect fan-out CALLS edges for overrides:
     # For every existing CALLS edge (A→B) where B.fqn is in override_index,
     # add CALLS edges (A→B1), (A→B2), etc. for each concrete override.
     r_calls = conn.execute(
@@ -782,17 +961,28 @@ def index_repo(
                 fan_out_edges.append((caller_id, override_id))
 
     seen_fanout: set[tuple[str, str]] = set()
+    dedup_fanout: list[tuple[str, str]] = []
     for caller_id, callee_id in fan_out_edges:
         pair = (caller_id, callee_id)
         if pair in written_call_pairs or pair in seen_fanout:
             continue
         seen_fanout.add(pair)
-        conn.execute(
-            "MATCH (a:Method), (b:Method) "
-            "WHERE a.id = $caller AND b.id = $callee "
-            "CREATE (a)-[:CALLS]->(b)",
-            {"caller": caller_id, "callee": callee_id},
-        )
+        dedup_fanout.append((caller_id, callee_id))
         counters["call_edges"] += 1
+
+    # Flush fan-out CALLS edges in 500-edge transactions
+    for _batch_start in range(0, max(1, len(dedup_fanout)), _EDGE_BATCH_SIZE):
+        batch = dedup_fanout[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
+        if not batch:
+            break
+        conn.execute("BEGIN TRANSACTION")
+        for caller_id, callee_id in batch:
+            conn.execute(
+                "MATCH (a:Method), (b:Method) "
+                "WHERE a.id = $caller AND b.id = $callee "
+                "CREATE (a)-[:CALLS]->(b)",
+                {"caller": caller_id, "callee": callee_id},
+            )
+        conn.execute("COMMIT")
 
     return counters

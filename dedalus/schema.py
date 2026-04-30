@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import kuzu
 
-SCHEMA_VERSION: int = 7
+SCHEMA_VERSION: int = 8
 
 _NODE_TABLES = [
     """CREATE NODE TABLE Repo(
@@ -81,6 +81,26 @@ _NODE_TABLES = [
         repo_id STRING,
         PRIMARY KEY(id)
     )""",
+    """CREATE NODE TABLE PerfSample(
+        id STRING,
+        endpoint_fqn STRING,
+        p50_ms DOUBLE,
+        p99_ms DOUBLE,
+        rps DOUBLE,
+        sample_time STRING,
+        source STRING,
+        repo_id STRING,
+        PRIMARY KEY(id)
+    )""",
+    """CREATE NODE TABLE CapacityEstimate(
+        id STRING,
+        endpoint_fqn STRING,
+        saturation_rps DOUBLE,
+        ceiling_concurrency DOUBLE,
+        risk_level STRING,
+        repo_id STRING,
+        PRIMARY KEY(id)
+    )""",
 ]
 
 _REL_TABLES = [
@@ -95,6 +115,7 @@ _REL_TABLES = [
     "CREATE REL TABLE EXTENDS(FROM Class TO Class)",
     "CREATE REL TABLE IMPLEMENTS(FROM Class TO Class)",
     "CREATE REL TABLE HAS_RELATION(FROM Class TO EntityRelation)",
+    "CREATE REL TABLE OBSERVED_AT(FROM Method TO PerfSample)",
 ]
 
 _DROP_REL_TABLES = [
@@ -109,12 +130,15 @@ _DROP_REL_TABLES = [
     "EXTENDS",
     "IMPLEMENTS",
     "HAS_RELATION",
+    "OBSERVED_AT",
 ]
 
 _DROP_NODE_TABLES = [
     "EntityRelation",
     "RestCall",
     "Endpoint",
+    "PerfSample",
+    "CapacityEstimate",
     "Method",
     "Class",
     "File",

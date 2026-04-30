@@ -259,6 +259,7 @@ def _html_page(title: str, body: str) -> str:
   <a href="/">Search</a>
   <a href="/graph">Graph</a>
   <a href="/endpoints">Endpoints</a>
+  <a href="/findings">Findings</a>
   <a href="/index">Index Repo</a>
 </nav>"""
     return f"""<!DOCTYPE html>
@@ -675,6 +676,219 @@ class _DB:
             log.error("endpoints(): %s", exc)
             return []
 
+    def findings(
+        self,
+        repo_name: str,
+        finding_type: str = "all",
+        min_severity: str = "low",
+        reachable_only: bool = False,
+    ) -> list[dict]:
+        """Aggregate security and performance findings for a repo.
+
+        finding_type: "all" | "security" | "perf"
+        min_severity: "low" | "medium" | "high"
+        reachable_only: if True, skip unreachable security sinks
+        """
+        if self._conn is None:
+            return []
+        try:
+            # Resolve repo_id
+            r = self._conn.execute(
+                "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+                {"name": repo_name},
+            )
+            if not r.has_next():
+                return []
+            repo_id = r.get_next()[0]
+        except Exception as exc:
+            log.error("findings() repo_id lookup: %s", exc)
+            return []
+
+        results: list[dict] = []
+
+        # ── Security findings ─────────────────────────────────────────────
+        if finding_type in ("all", "security"):
+            try:
+                from dedalus.security_config import get_security_config  # noqa: PLC0415
+                cfg = get_security_config()
+
+                # OWASP severity mapping
+                _OWASP_MAP: dict[str, str] = {
+                    "execute": "A03:2021",
+                    "executeQuery": "A03:2021",
+                    "executeUpdate": "A03:2021",
+                    "createQuery": "A03:2021",
+                    "query": "A03:2021",
+                    "getForEntity": "A10:2021",
+                    "postForEntity": "A10:2021",
+                    "exchange": "A10:2021",
+                    "exec": "A03:2021",
+                    "start": "A03:2021",
+                    "readAllBytes": "A01:2021",
+                    "newBufferedReader": "A01:2021",
+                }
+                _SEVERITY_MAP: dict[str, str] = {
+                    "A01:2021": "HIGH",
+                    "A03:2021": "HIGH",
+                    "A10:2021": "MEDIUM",
+                }
+
+                # Optional reachability filter
+                reachable_ids: set[str] | None = None
+                if reachable_only:
+                    try:
+                        from collections import deque as _deque  # noqa: PLC0415
+                        seed_ids: set[str] = set()
+                        r_ep = self._conn.execute(
+                            "MATCH (repo2:Repo)-[:EXPOSES]->(ep:Endpoint) WHERE repo2.id = $rid "
+                            "RETURN ep.handler_method_id",
+                            {"rid": repo_id},
+                        )
+                        while r_ep.has_next():
+                            mid = r_ep.get_next()[0]
+                            if mid:
+                                seed_ids.add(mid)
+                        r_entry = self._conn.execute(
+                            "MATCH (m:Method) WHERE m.repo_id = $rid AND m.is_entry_point = true RETURN m.id",
+                            {"rid": repo_id},
+                        )
+                        while r_entry.has_next():
+                            seed_ids.add(r_entry.get_next()[0])
+                        if seed_ids:
+                            r_adj = self._conn.execute(
+                                "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id",
+                                {"rid": repo_id},
+                            )
+                            adj_fwd: dict[str, list[str]] = {}
+                            while r_adj.has_next():
+                                src, dst = r_adj.get_next()
+                                adj_fwd.setdefault(src, []).append(dst)
+                            reachable_ids = set(seed_ids)
+                            q: deque = _deque(seed_ids)  # type: ignore[assignment]
+                            while q:
+                                cur = q.popleft()
+                                for nxt in adj_fwd.get(cur, []):
+                                    if nxt not in reachable_ids:
+                                        reachable_ids.add(nxt)
+                                        q.append(nxt)
+                        else:
+                            reachable_ids = set()
+                    except Exception as exc2:
+                        log.error("findings() reachability: %s", exc2)
+                        reachable_ids = None  # skip filter on error
+
+                # UNRESOLVED_CALL sinks
+                r_rc = self._conn.execute(
+                    "MATCH (m:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
+                    "WHERE m.repo_id = $rid "
+                    "MATCH (f:File) WHERE f.id = m.file_id "
+                    "RETURN m.fqn, m.id, rc.callee_name, f.path, m.line_start",
+                    {"rid": repo_id},
+                )
+                while r_rc.has_next():
+                    caller_fqn, caller_id, callee_name, file_path, line_start = r_rc.get_next()
+                    if not callee_name or not cfg.is_sink_method(callee_name):
+                        continue
+                    if reachable_ids is not None and caller_id not in reachable_ids:
+                        continue
+                    short = callee_name.split(".")[-1]
+                    owasp = _OWASP_MAP.get(short, "A00:2021")
+                    sev = _SEVERITY_MAP.get(owasp, "MEDIUM")
+                    results.append({
+                        "type": "taint_sink",
+                        "severity": sev,
+                        "category": owasp,
+                        "method_fqn": caller_fqn,
+                        "file_path": file_path or "",
+                        "line_start": line_start,
+                        "detail": f"Call to sink: {callee_name}",
+                        "owasp": owasp,
+                        "complexity_hint": None,
+                        "p99_ms": None,
+                    })
+
+                # CALLS edges to known sinks
+                r_c = self._conn.execute(
+                    "MATCH (m:Method)-[:CALLS]->(s:Method) "
+                    "WHERE m.repo_id = $rid "
+                    "MATCH (f:File) WHERE f.id = m.file_id "
+                    "RETURN m.fqn, m.id, s.fqn, s.name, f.path, m.line_start",
+                    {"rid": repo_id},
+                )
+                while r_c.has_next():
+                    caller_fqn, caller_id, callee_fqn, callee_name, file_path, line_start = r_c.get_next()
+                    if not (cfg.is_sink_method(callee_fqn) or cfg.is_sink_method(callee_name)):
+                        continue
+                    if reachable_ids is not None and caller_id not in reachable_ids:
+                        continue
+                    short = (callee_fqn or callee_name or "").split(".")[-1]
+                    owasp = _OWASP_MAP.get(short, "A00:2021")
+                    sev = _SEVERITY_MAP.get(owasp, "MEDIUM")
+                    results.append({
+                        "type": "taint_sink",
+                        "severity": sev,
+                        "category": owasp,
+                        "method_fqn": caller_fqn,
+                        "file_path": file_path or "",
+                        "line_start": line_start,
+                        "detail": f"Call to sink: {callee_fqn or callee_name}",
+                        "owasp": owasp,
+                        "complexity_hint": None,
+                        "p99_ms": None,
+                    })
+            except Exception as exc:
+                log.error("findings() security: %s", exc)
+
+        # ── Complexity/perf findings ──────────────────────────────────────
+        if finding_type in ("all", "perf"):
+            try:
+                r_m = self._conn.execute(
+                    "MATCH (m:Method) WHERE m.repo_id = $rid AND m.complexity_hint <> '' "
+                    "MATCH (f:File) WHERE f.id = m.file_id "
+                    "RETURN m.fqn, f.path, m.line_start, m.complexity_hint",
+                    {"rid": repo_id},
+                )
+                while r_m.has_next():
+                    fqn, file_path, line_start, hint = r_m.get_next()
+                    tags = {t.strip() for t in (hint or "").split(",") if t.strip()}
+                    if "O(n2)" in hint or "n+1-risk" in hint:
+                        sev = "HIGH"
+                    elif tags == {"recursive"}:
+                        sev = "LOW"
+                    else:
+                        sev = "MEDIUM"
+                    results.append({
+                        "type": "complexity_hint",
+                        "severity": sev,
+                        "category": "Performance",
+                        "method_fqn": fqn,
+                        "file_path": file_path or "",
+                        "line_start": line_start,
+                        "detail": hint,
+                        "owasp": None,
+                        "complexity_hint": hint,
+                        "p99_ms": None,
+                    })
+            except Exception as exc:
+                log.error("findings() perf: %s", exc)
+
+        # Severity filter
+        sev_order = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+        min_sev_val = {"high": 3, "medium": 2, "low": 1}.get(min_severity.lower(), 1)
+        results = [r for r in results if sev_order.get(r["severity"], 0) >= min_sev_val]
+
+        # Deduplicate by (type, method_fqn, detail)
+        seen_keys: set[tuple] = set()
+        deduped: list[dict] = []
+        for r in results:
+            key = (r["type"], r["method_fqn"], r["detail"])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped.append(r)
+
+        deduped.sort(key=lambda x: (-sev_order.get(x["severity"], 0), x["method_fqn"]))
+        return deduped
+
     def index_repo(self, repo_path: str, repo_name: str, db_path: str) -> dict:
         try:
             from dedalus.indexer import index_repo  # noqa: PLC0415
@@ -819,6 +1033,160 @@ def _page_endpoints(db: _DB) -> str:
     return _html_page("Endpoints", f"""
 <h1>HTTP Endpoints <span style="color:#475569;font-size:0.85rem;">({len(rows)} total)</span></h1>
 <div class="section">{table_html}</div>
+""")
+
+
+def _page_findings(db: _DB, repo_name: str = "") -> str:
+    repos = db.repos()
+    repo_options = "".join(
+        f'<option value="{_esc(r["name"])}" {"selected" if r["name"] == repo_name else ""}>'
+        f'{_esc(r["name"])}</option>'
+        for r in repos
+    )
+    if not repo_name and repos:
+        repo_name = repos[0]["name"]
+
+    return _html_page("Findings", f"""
+<h1>Security &amp; Performance Findings</h1>
+
+<!-- Filter toolbar -->
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px;">
+  <select id="findingsRepo" style="background:#1e2130;border:1px solid #2d3148;border-radius:8px;padding:8px 14px;color:#e2e8f0;font-size:0.9rem;outline:none;">
+    <option value="">-- select repo --</option>
+    {repo_options}
+  </select>
+
+  <select id="findingsType" style="background:#1e2130;border:1px solid #2d3148;border-radius:8px;padding:8px 14px;color:#e2e8f0;font-size:0.9rem;outline:none;">
+    <option value="all">All types</option>
+    <option value="security">Security only</option>
+    <option value="perf">Performance only</option>
+  </select>
+
+  <select id="findingsSev" style="background:#1e2130;border:1px solid #2d3148;border-radius:8px;padding:8px 14px;color:#e2e8f0;font-size:0.9rem;outline:none;">
+    <option value="low">All severities</option>
+    <option value="medium">Medium+</option>
+    <option value="high">High only</option>
+  </select>
+
+  <label style="display:flex;align-items:center;gap:6px;color:#94a3b8;font-size:0.88rem;cursor:pointer;">
+    <input type="checkbox" id="reachableOnly" style="cursor:pointer;accent-color:#6366f1;">
+    Reachable only
+  </label>
+
+  <button id="refreshBtn" onclick="loadFindings()"
+    style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:0.88rem;cursor:pointer;font-weight:600;">
+    Refresh
+  </button>
+
+  <span id="findingsStatus" style="color:#64748b;font-size:0.8rem;margin-left:4px;"></span>
+
+  <a id="exportLink" href="#" onclick="exportFindings(); return false;"
+    style="margin-left:auto;font-size:0.82rem;color:#60a5fa;text-decoration:none;">
+    &#8659; Export JSON
+  </a>
+</div>
+
+<!-- Findings table -->
+<div class="section" style="padding:0;overflow-x:auto;">
+  <table id="findingsTable">
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Severity</th>
+        <th>Category</th>
+        <th>Method</th>
+        <th>File:Line</th>
+        <th>Detail</th>
+      </tr>
+    </thead>
+    <tbody id="findingsTbody">
+      <tr><td colspan="6" class="empty" style="text-align:center;padding:24px;">Select a repository and click Refresh.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+function _esc(s) {{
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}}
+
+const SEV_BG = {{ HIGH: '#2d0a0a', MEDIUM: '#2d1a00', LOW: '#1a1e0a' }};
+const SEV_COLOR = {{ HIGH: '#fca5a5', MEDIUM: '#fdba74', LOW: '#d9f99d' }};
+const TYPE_LABEL = {{
+  taint_sink:       'Taint Sink',
+  cross_service_taint: 'X-Service Taint',
+  second_order:     '2nd-Order Inj.',
+  complexity_hint:  'Complexity',
+}};
+
+function loadFindings() {{
+  const repo   = document.getElementById('findingsRepo').value;
+  const type   = document.getElementById('findingsType').value;
+  const sev    = document.getElementById('findingsSev').value;
+  const reach  = document.getElementById('reachableOnly').checked;
+  const status = document.getElementById('findingsStatus');
+  const tbody  = document.getElementById('findingsTbody');
+
+  if (!repo) {{
+    tbody.innerHTML = '<tr><td colspan="6" class="empty" style="text-align:center;padding:24px;">Select a repository first.</td></tr>';
+    status.textContent = '';
+    return;
+  }}
+
+  status.textContent = 'Loading…';
+  tbody.innerHTML    = '<tr><td colspan="6" class="empty" style="text-align:center;padding:24px;">Loading…</td></tr>';
+
+  const url = `/api/findings?repo=${{encodeURIComponent(repo)}}&type=${{encodeURIComponent(type)}}&min_severity=${{encodeURIComponent(sev)}}&reachable_only=${{reach}}`;
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {{
+      status.textContent = `${{data.length}} finding${{data.length !== 1 ? 's' : ''}}`;
+      if (!data.length) {{
+        tbody.innerHTML = '<tr><td colspan="6" class="empty" style="text-align:center;padding:24px;">No findings for the selected filters.</td></tr>';
+        return;
+      }}
+      tbody.innerHTML = data.map(f => {{
+        const bg  = SEV_BG[f.severity]  || '#1a1d27';
+        const fc  = SEV_COLOR[f.severity] || '#e2e8f0';
+        const typeLabel = TYPE_LABEL[f.type] || _esc(f.type);
+        const fileLine = f.line_start ? `${{_esc(f.file_path)}}:${{f.line_start}}` : _esc(f.file_path);
+        return `<tr style="background:${{bg}};">
+          <td style="white-space:nowrap;">${{typeLabel}}</td>
+          <td><span style="font-weight:700;color:${{fc}};">${{_esc(f.severity)}}</span></td>
+          <td style="white-space:nowrap;">${{_esc(f.category)}}</td>
+          <td style="font-family:monospace;word-break:break-all;">${{_esc(f.method_fqn)}}</td>
+          <td style="font-family:monospace;font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;" title="${{_esc(fileLine)}}">${{_esc(fileLine)}}</td>
+          <td style="font-size:0.82rem;">${{_esc(f.detail)}}</td>
+        </tr>`;
+      }}).join('');
+    }})
+    .catch(err => {{
+      status.textContent = 'Error';
+      tbody.innerHTML = `<tr><td colspan="6" class="empty" style="text-align:center;padding:24px;color:#fca5a5;">Error: ${{err}}</td></tr>`;
+    }});
+}}
+
+function exportFindings() {{
+  const repo  = document.getElementById('findingsRepo').value;
+  const type  = document.getElementById('findingsType').value;
+  const sev   = document.getElementById('findingsSev').value;
+  const reach = document.getElementById('reachableOnly').checked;
+  if (!repo) {{ alert('Select a repository first.'); return; }}
+  const url = `/api/findings/export?repo=${{encodeURIComponent(repo)}}&type=${{encodeURIComponent(type)}}&min_severity=${{encodeURIComponent(sev)}}&reachable_only=${{reach}}`;
+  window.location.href = url;
+}}
+
+// Auto-load if a repo is pre-selected
+window.addEventListener('DOMContentLoaded', () => {{
+  const sel = document.getElementById('findingsRepo');
+  if (sel.value) loadFindings();
+}});
+document.getElementById('findingsRepo').onchange = loadFindings;
+</script>
 """)
 
 
@@ -1369,6 +1737,10 @@ def _make_app(db: _DB, db_path: str):
         repo_name = request.query_params.get("repo", "")
         return HTMLResponse(_page_graph(db, repo_name))
 
+    async def findings_page(request: Request) -> HTMLResponse:
+        repo_name = request.query_params.get("repo", "")
+        return HTMLResponse(_page_findings(db, repo_name))
+
     async def api_graph(request: Request):
         from starlette.responses import JSONResponse  # noqa: PLC0415
         repo_name = request.query_params.get("repo", "")
@@ -1381,6 +1753,42 @@ def _make_app(db: _DB, db_path: str):
         repo_name = request.query_params.get("repo", "")
         branches = db.branches(repo_name)
         return JSONResponse([b["name"] for b in branches])
+
+    async def api_findings(request: Request):
+        from starlette.responses import JSONResponse  # noqa: PLC0415
+        repo_name = request.query_params.get("repo", "")
+        finding_type = request.query_params.get("type", "all")
+        min_severity = request.query_params.get("min_severity", "low")
+        reachable_only = request.query_params.get("reachable_only", "false").lower() == "true"
+        data = db.findings(
+            repo_name,
+            finding_type=finding_type,
+            min_severity=min_severity,
+            reachable_only=reachable_only,
+        )
+        return JSONResponse(data)
+
+    async def api_findings_export(request: Request):
+        import json as _json  # noqa: PLC0415
+        from starlette.responses import Response  # noqa: PLC0415
+        repo_name = request.query_params.get("repo", "")
+        finding_type = request.query_params.get("type", "all")
+        min_severity = request.query_params.get("min_severity", "low")
+        reachable_only = request.query_params.get("reachable_only", "false").lower() == "true"
+        data = db.findings(
+            repo_name,
+            finding_type=finding_type,
+            min_severity=min_severity,
+            reachable_only=reachable_only,
+        )
+        safe_name = (repo_name or "findings").replace("/", "_").replace("\\", "_")
+        filename = f"dedalus-findings-{safe_name}.json"
+        body = _json.dumps(data, indent=2)
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     async def index_get(request: Request) -> HTMLResponse:
         return HTMLResponse(_page_index_form())
@@ -1397,8 +1805,11 @@ def _make_app(db: _DB, db_path: str):
         Route("/", home),
         Route("/symbol", symbol),
         Route("/graph", graph),
+        Route("/findings", findings_page),
         Route("/api/graph", api_graph),
         Route("/api/branches", api_branches),
+        Route("/api/findings", api_findings),
+        Route("/api/findings/export", api_findings_export),
         Route("/endpoints", endpoints),
         Route("/index", index_get, methods=["GET"]),
         Route("/index", index_post, methods=["POST"]),

@@ -1543,6 +1543,438 @@ def find_complexity_hints(repo_name: str, min_severity: str = "medium") -> list[
 
 
 # ---------------------------------------------------------------------------
+# G8 Tool 1: ingest_perf_results
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ingest_perf_results(repo_name: str, file_path: str) -> dict:
+    """Ingest a Gatling/JMeter/JSON perf results file into the graph.
+
+    Creates PerfSample nodes and OBSERVED_AT edges to matching Method nodes.
+
+    Args:
+        repo_name: The logical name of the indexed repository.
+        file_path: Absolute path to the perf results file
+                   (.log = Gatling, .xml = JMeter, .json = simple JSON).
+
+    Returns:
+        Dict with keys ``ingested``, ``matched_methods``, ``unmatched``.
+        On failure, returns ``{"error": "<message>"}``.
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    from dedalus.perf_ingest import parse_perf_file  # noqa: PLC0415
+
+    conn = _get_connection()
+    if conn is None:
+        return {"error": "No database found — index a repo first."}
+
+    try:
+        # Resolve repo_id
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return {"error": f"Repo {repo_name!r} not found."}
+        repo_id = r.get_next()[0]
+
+        samples = parse_perf_file(file_path)
+
+        ingested = 0
+        matched_methods = 0
+        unmatched = 0
+
+        for sample in samples:
+            endpoint_fqn = sample["endpoint_fqn"]
+            sample_id = _hashlib.md5(f"{repo_id}:{endpoint_fqn}".encode()).hexdigest()
+
+            # Upsert PerfSample node (delete old if exists to allow re-ingest)
+            conn.execute(
+                "MATCH (ps:PerfSample) WHERE ps.id = $id DELETE ps",
+                {"id": sample_id},
+            )
+            conn.execute(
+                "CREATE (:PerfSample {"
+                "id: $id, endpoint_fqn: $endpoint_fqn, p50_ms: $p50_ms, "
+                "p99_ms: $p99_ms, rps: $rps, sample_time: $sample_time, "
+                "source: $source, repo_id: $repo_id"
+                "})",
+                {
+                    "id": sample_id,
+                    "endpoint_fqn": endpoint_fqn,
+                    "p50_ms": float(sample["p50_ms"]),
+                    "p99_ms": float(sample["p99_ms"]),
+                    "rps": float(sample["rps"]),
+                    "sample_time": sample["sample_time"],
+                    "source": sample["source"],
+                    "repo_id": repo_id,
+                },
+            )
+            ingested += 1
+
+            # Try exact FQN match first
+            matched = False
+            r_exact = conn.execute(
+                "MATCH (m:Method) WHERE m.repo_id = $rid AND m.fqn = $fqn RETURN m.id",
+                {"rid": repo_id, "fqn": endpoint_fqn},
+            )
+            method_ids: list[str] = []
+            while r_exact.has_next():
+                method_ids.append(r_exact.get_next()[0])
+
+            # Substring match on method name if no exact FQN match
+            if not method_ids:
+                # endpoint_fqn may be just the method name or a partial path
+                short_name = endpoint_fqn.split(".")[-1].split("/")[-1]
+                if short_name:
+                    r_sub = conn.execute(
+                        "MATCH (m:Method) WHERE m.repo_id = $rid AND m.name = $name RETURN m.id",
+                        {"rid": repo_id, "name": short_name},
+                    )
+                    while r_sub.has_next():
+                        method_ids.append(r_sub.get_next()[0])
+
+            for mid in method_ids:
+                # Remove stale OBSERVED_AT edge for this method/sample pair before re-creating
+                conn.execute(
+                    "MATCH (m:Method)-[r:OBSERVED_AT]->(ps:PerfSample) "
+                    "WHERE m.id = $mid AND ps.id = $psid DELETE r",
+                    {"mid": mid, "psid": sample_id},
+                )
+                conn.execute(
+                    "MATCH (m:Method), (ps:PerfSample) "
+                    "WHERE m.id = $mid AND ps.id = $psid "
+                    "CREATE (m)-[:OBSERVED_AT]->(ps)",
+                    {"mid": mid, "psid": sample_id},
+                )
+                matched = True
+
+            if matched:
+                matched_methods += 1
+            else:
+                unmatched += 1
+
+        return {"ingested": ingested, "matched_methods": matched_methods, "unmatched": unmatched}
+
+    except Exception as exc:
+        log.error("ingest_perf_results(%r, %r): %s", repo_name, file_path, exc)
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# G8 Tool 2: find_hotspots
+# ---------------------------------------------------------------------------
+
+# Hint weight map used by find_hotspots
+_HINT_WEIGHTS: dict[str, float] = {
+    "O(n2)-candidate": 3.0,
+    "O(n2)-list-scan": 2.5,
+    "n+1-risk":        2.0,
+    "unbounded-query": 1.5,
+    "recursive":       1.0,
+}
+
+
+def _max_hint_weight(complexity_hint: str) -> float:
+    """Return the highest hint weight from a comma-separated complexity_hint string."""
+    if not complexity_hint:
+        return 0.0
+    tags = [t.strip() for t in complexity_hint.split(",") if t.strip()]
+    return max((_HINT_WEIGHTS.get(tag, 0.5) for tag in tags), default=0.5)
+
+
+@mcp.tool()
+def find_hotspots(repo_name: str) -> list[dict]:
+    """Return methods ranked by composite risk: complexity_hint x p99.
+
+    Methods with both a complexity hint AND high p99 latency are ranked highest.
+    Methods that have a complexity hint but no perf data are included with
+    p99_ms=null and risk_score = hint_weight * 100.
+
+    Args:
+        repo_name: The logical name of the indexed repository.
+
+    Returns:
+        List of dicts: ``method_fqn``, ``complexity_hint``, ``p99_ms``,
+        ``p50_ms``, ``risk_score``, ``file_path``, ``line_start``.
+        Sorted by risk_score descending.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # Methods with complexity hints
+        r_m = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND m.complexity_hint <> '' "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.id, m.fqn, m.complexity_hint, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        method_rows = _rows(r_m, ["method_id", "fqn", "complexity_hint", "file_path", "line_start"])
+
+        if not method_rows:
+            return []
+
+        # PerfSample data keyed by method_id
+        perf_by_method: dict[str, dict] = {}
+        r_perf = conn.execute(
+            "MATCH (m:Method)-[:OBSERVED_AT]->(ps:PerfSample) "
+            "WHERE m.repo_id = $rid "
+            "RETURN m.id, ps.p99_ms, ps.p50_ms",
+            {"rid": repo_id},
+        )
+        while r_perf.has_next():
+            mid, p99, p50 = r_perf.get_next()
+            # Keep the worst (highest p99) reading per method
+            if mid not in perf_by_method or p99 > perf_by_method[mid]["p99_ms"]:
+                perf_by_method[mid] = {"p99_ms": p99, "p50_ms": p50}
+
+        results: list[dict] = []
+        for row in method_rows:
+            mid = row["method_id"]
+            hint = row["complexity_hint"]
+            weight = _max_hint_weight(hint)
+            perf = perf_by_method.get(mid)
+            if perf is not None:
+                p99 = perf["p99_ms"]
+                p50 = perf["p50_ms"]
+                risk_score = p99 * weight
+            else:
+                p99 = None
+                p50 = None
+                risk_score = weight * 100.0
+            results.append({
+                "method_fqn": row["fqn"],
+                "complexity_hint": hint,
+                "p99_ms": p99,
+                "p50_ms": p50,
+                "risk_score": risk_score,
+                "file_path": row["file_path"],
+                "line_start": row["line_start"],
+            })
+
+        results.sort(key=lambda x: x["risk_score"], reverse=True)
+        return results
+    except Exception as exc:
+        log.error("find_hotspots(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# G8 Tool 3: estimate_capacity
+# ---------------------------------------------------------------------------
+
+_THREAD_POOL_SIZE = 200  # Spring Boot Tomcat default
+
+
+@mcp.tool()
+def estimate_capacity(repo_name: str) -> list[dict]:
+    """Estimate capacity per endpoint using Little's Law.
+
+    concurrency = RPS x (p99_ms / 1000)
+    saturation_rps = thread_pool_size / (p99_ms / 1000)
+
+    Risk levels (based on current_rps / saturation_rps):
+      CRITICAL  > 80%
+      HIGH      > 60%
+      MEDIUM    > 40%
+      LOW       otherwise
+
+    Args:
+        repo_name: The logical name of the indexed repository.
+
+    Returns:
+        List of dicts: ``endpoint_fqn``, ``current_rps``, ``p99_ms``,
+        ``saturation_rps``, ``ceiling_concurrency``, ``risk_level``.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        r_ps = conn.execute(
+            "MATCH (ps:PerfSample) WHERE ps.repo_id = $rid "
+            "RETURN ps.endpoint_fqn, ps.rps, ps.p99_ms",
+            {"rid": repo_id},
+        )
+        rows = _rows(r_ps, ["endpoint_fqn", "current_rps", "p99_ms"])
+
+        results: list[dict] = []
+        for row in rows:
+            p99_ms = row["p99_ms"]
+            current_rps = row["current_rps"]
+            if p99_ms is None or p99_ms <= 0:
+                continue
+            p99_s = p99_ms / 1000.0
+            saturation_rps = _THREAD_POOL_SIZE / p99_s
+            ceiling_concurrency = current_rps * p99_s
+            ratio = current_rps / saturation_rps if saturation_rps > 0 else 0.0
+            if ratio > 0.8:
+                risk_level = "CRITICAL"
+            elif ratio > 0.6:
+                risk_level = "HIGH"
+            elif ratio > 0.4:
+                risk_level = "MEDIUM"
+            else:
+                risk_level = "LOW"
+            results.append({
+                "endpoint_fqn": row["endpoint_fqn"],
+                "current_rps": current_rps,
+                "p99_ms": p99_ms,
+                "saturation_rps": saturation_rps,
+                "ceiling_concurrency": ceiling_concurrency,
+                "risk_level": risk_level,
+            })
+
+        results.sort(key=lambda x: x["current_rps"] / x["saturation_rps"] if x["saturation_rps"] > 0 else 0, reverse=True)
+        return results
+    except Exception as exc:
+        log.error("estimate_capacity(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# G8 Tool 4: find_cascade_risk
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_cascade_risk(repo_name: str) -> list[dict]:
+    """Find upstream endpoints at cascade risk from saturated downstream services.
+
+    Walks CALLS_REST edges: if Method A (in repo_name) calls Endpoint B (in
+    another repo) and B's corresponding PerfSample has a lower saturation_rps
+    than A's current_rps, A is flagged as being at cascade risk.
+
+    saturation_rps for endpoint B = thread_pool_size / (p99_ms / 1000).
+
+    Args:
+        repo_name: The logical name of the upstream repository to analyse.
+
+    Returns:
+        List of dicts: ``upstream_method_fqn``, ``downstream_endpoint``,
+        ``downstream_saturation_rps``, ``upstream_current_rps``,
+        ``risk`` (``"SATURATED"`` or ``"NEAR_SATURATION"``).
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # Find all CALLS_REST edges from methods in this repo to Endpoints in other repos
+        r_cr = conn.execute(
+            "MATCH (m:Method)-[:CALLS_REST]->(ep:Endpoint) "
+            "WHERE m.repo_id = $rid AND ep.repo_id <> $rid "
+            "RETURN m.fqn, m.id, ep.path, ep.http_method, ep.repo_id",
+            {"rid": repo_id},
+        )
+        calls_rest_rows = _rows(r_cr, ["method_fqn", "method_id", "ep_path", "ep_http_method", "ep_repo_id"])
+
+        if not calls_rest_rows:
+            return []
+
+        # Load upstream PerfSamples (current_rps of methods in this repo)
+        # We look for OBSERVED_AT on the upstream method
+        r_up_perf = conn.execute(
+            "MATCH (m:Method)-[:OBSERVED_AT]->(ps:PerfSample) "
+            "WHERE m.repo_id = $rid "
+            "RETURN m.id, ps.rps",
+            {"rid": repo_id},
+        )
+        upstream_rps: dict[str, float] = {}
+        while r_up_perf.has_next():
+            mid, rps = r_up_perf.get_next()
+            upstream_rps[mid] = rps
+
+        # Load downstream PerfSamples (by endpoint_fqn matching ep path or method fqn)
+        # Collect all downstream repo_ids
+        downstream_repo_ids = {row["ep_repo_id"] for row in calls_rest_rows}
+
+        down_perf: dict[str, dict] = {}  # endpoint_fqn -> {p99_ms, rps}
+        for dr_id in downstream_repo_ids:
+            r_dp = conn.execute(
+                "MATCH (ps:PerfSample) WHERE ps.repo_id = $rid "
+                "RETURN ps.endpoint_fqn, ps.p99_ms, ps.rps",
+                {"rid": dr_id},
+            )
+            while r_dp.has_next():
+                efqn, p99, rps = r_dp.get_next()
+                if p99 and p99 > 0:
+                    down_perf[efqn] = {"p99_ms": p99, "rps": rps}
+
+        results: list[dict] = []
+        for row in calls_rest_rows:
+            method_fqn = row["method_fqn"]
+            method_id = row["method_id"]
+            ep_label = f"{row['ep_http_method']} {row['ep_path']}"
+            ep_path = row["ep_path"]
+
+            # Try to find downstream perf data by path substring match
+            ds_data = down_perf.get(ep_path)
+            if ds_data is None:
+                # Try any key that contains the path
+                for k, v in down_perf.items():
+                    if ep_path in k or k in ep_path:
+                        ds_data = v
+                        break
+            if ds_data is None:
+                continue
+
+            p99_ms = ds_data["p99_ms"]
+            if p99_ms <= 0:
+                continue
+            saturation_rps = _THREAD_POOL_SIZE / (p99_ms / 1000.0)
+
+            current_rps = upstream_rps.get(method_id, 0.0)
+            if current_rps <= 0:
+                continue
+
+            ratio = current_rps / saturation_rps if saturation_rps > 0 else 0.0
+            if ratio > 1.0:
+                risk = "SATURATED"
+            elif ratio > 0.8:
+                risk = "NEAR_SATURATION"
+            else:
+                continue  # not at risk
+
+            results.append({
+                "upstream_method_fqn": method_fqn,
+                "downstream_endpoint": ep_label,
+                "downstream_saturation_rps": saturation_rps,
+                "upstream_current_rps": current_rps,
+                "risk": risk,
+            })
+
+        results.sort(key=lambda x: x["upstream_current_rps"] / x["downstream_saturation_rps"]
+                     if x["downstream_saturation_rps"] > 0 else 0, reverse=True)
+        return results
+    except Exception as exc:
+        log.error("find_cascade_risk(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
 # Tool 11: index_repo_tool
 # ---------------------------------------------------------------------------
 

@@ -4,13 +4,23 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 import tree_sitter_java
+import tree_sitter_javascript as _tjs
 import tree_sitter_kotlin
+import tree_sitter_typescript as _tts
 from tree_sitter import Language, Parser
 
 _LANGUAGE_FACTORIES: dict[str, object] = {
     "java": tree_sitter_java.language,
     "kotlin": tree_sitter_kotlin.language,
+    "javascript": _tjs.language,
+    "typescript": _tts.language_typescript,
+    "typescript_tsx": _tts.language_tsx,
 }
+
+# Pre-built Language objects for the JS/TS grammars (used by js_extractor)
+JS_LANGUAGE = Language(_tjs.language())
+TS_LANGUAGE = Language(_tts.language_typescript())
+TSX_LANGUAGE = Language(_tts.language_tsx())
 
 _parser_cache: dict[str, Parser] = {}
 _registry: dict[str, "LanguageExtractor"] = {}
