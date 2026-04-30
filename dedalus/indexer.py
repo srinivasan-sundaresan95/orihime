@@ -541,7 +541,8 @@ def index_repo(
                 "id: $id, name: $name, fqn: $fqn, class_id: $class_id, "
                 "file_id: $file_id, repo_id: $repo_id, line_start: $line_start, "
                 "is_suspend: $is_suspend, annotations: $annotations, "
-                "generated: $generated"
+                "generated: $generated, is_entry_point: $is_entry_point, "
+                "complexity_hint: $complexity_hint"
                 "})",
                 method,
             )

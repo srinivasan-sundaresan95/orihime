@@ -1262,6 +1262,287 @@ def generate_security_report(repo_name: str, framework: str = "owasp") -> list[d
 
 
 # ---------------------------------------------------------------------------
+# Security Tool S8a: find_entry_points
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_entry_points(repo_name: str) -> list[dict]:
+    """Return all methods/endpoints marked as entry points (is_entry_point=true).
+
+    Entry points include HTTP handler methods, @KafkaListener, @Scheduled,
+    @JmsListener, and @RabbitListener methods.
+
+    Args:
+        repo_name: Repository to query.
+
+    Returns:
+        List of dicts with keys ``fqn``, ``file_path``, ``line_start``,
+        ``annotations``.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        result = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND m.is_entry_point = true "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn AS fqn, f.path AS file_path, m.line_start AS line_start, "
+            "       m.annotations AS annotations",
+            {"rid": repo_id},
+        )
+        return _rows(result, ["fqn", "file_path", "line_start", "annotations"])
+    except Exception as exc:
+        log.error("find_entry_points(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# Security Tool S8b: find_reachable_sinks
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_reachable_sinks(repo_name: str, show_all: bool = False) -> list[dict]:
+    """Return taint sinks reachable from entry points via CALLS edges.
+
+    When show_all=False (default), only returns sinks reachable from an entry
+    point.  When show_all=True, returns all sinks (same as find_taint_sinks).
+
+    Uses BFS from all entry points through CALLS edges to build a reachable
+    method ID set, then filters find_taint_sinks results to only those whose
+    caller method is reachable from an entry point.
+
+    Args:
+        repo_name: Repository to analyse.
+        show_all:  When True, skip reachability filtering and return all sinks.
+
+    Returns:
+        List of dicts with keys ``caller_fqn``, ``sink_method``, ``file_path``,
+        ``line_start``, ``sink_category``.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+
+    if show_all:
+        return find_taint_sinks(repo_name)
+
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # 1. Collect seed method IDs from is_entry_point=true methods
+        seed_ids: set[str] = set()
+        r_ep_methods = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND m.is_entry_point = true RETURN m.id",
+            {"rid": repo_id},
+        )
+        while r_ep_methods.has_next():
+            seed_ids.add(r_ep_methods.get_next()[0])
+
+        # Also collect handler_method_ids from Endpoint nodes (belt-and-suspenders
+        # in case is_entry_point was not set during indexing for older DBs)
+        r_handlers = conn.execute(
+            "MATCH (repo2:Repo)-[:EXPOSES]->(ep:Endpoint) WHERE repo2.id = $rid "
+            "RETURN ep.handler_method_id",
+            {"rid": repo_id},
+        )
+        while r_handlers.has_next():
+            mid = r_handlers.get_next()[0]
+            if mid:
+                seed_ids.add(mid)
+
+        if not seed_ids:
+            return []
+
+        # 2. Load full CALLS adjacency list for this repo (callee direction)
+        r_calls = conn.execute(
+            "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id",
+            {"rid": repo_id},
+        )
+        adj: dict[str, list[str]] = {}
+        while r_calls.has_next():
+            src, dst = r_calls.get_next()
+            adj.setdefault(src, []).append(dst)
+
+        # 3. BFS to build reachable method ID set
+        reachable: set[str] = set(seed_ids)
+        queue: deque[str] = deque(seed_ids)
+        while queue:
+            current = queue.popleft()
+            for callee in adj.get(current, []):
+                if callee not in reachable:
+                    reachable.add(callee)
+                    queue.append(callee)
+
+        # 4. Get all taint sinks (reuse find_taint_sinks logic directly to avoid
+        #    a second DB open — we need the caller method IDs to filter)
+        from dedalus.security_config import get_security_config  # noqa: PLC0415
+        cfg = get_security_config()
+        results: list[dict] = []
+
+        # Build fqn → id mapping to resolve caller_fqn back to caller_id
+        r_fqn = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid RETURN m.fqn, m.id",
+            {"rid": repo_id},
+        )
+        fqn_to_id: dict[str, str] = {}
+        while r_fqn.has_next():
+            fqn, mid = r_fqn.get_next()
+            fqn_to_id[fqn] = mid
+
+        # Check UNRESOLVED_CALL nodes whose callee_name matches a known sink
+        r_rc = conn.execute(
+            "MATCH (m:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
+            "WHERE m.repo_id = $rid "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn, m.id, rc.callee_name, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        while r_rc.has_next():
+            caller_fqn, caller_id, callee_name, file_path, line_start = r_rc.get_next()
+            if callee_name and cfg.is_sink_method(callee_name) and caller_id in reachable:
+                results.append({
+                    "caller_fqn": caller_fqn,
+                    "sink_method": callee_name,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "sink_category": "custom",
+                })
+
+        # Cross-service sinks via CALLS edges to methods whose FQN matches a known sink
+        r_c = conn.execute(
+            "MATCH (m:Method)-[:CALLS]->(s:Method) "
+            "WHERE m.repo_id = $rid "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn, m.id, s.fqn, s.name, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        while r_c.has_next():
+            caller_fqn, caller_id, callee_fqn, callee_name, file_path, line_start = r_c.get_next()
+            if (cfg.is_sink_method(callee_fqn) or cfg.is_sink_method(callee_name)) and caller_id in reachable:
+                results.append({
+                    "caller_fqn": caller_fqn,
+                    "sink_method": callee_fqn,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "sink_category": "configured",
+                })
+
+        return results
+    except Exception as exc:
+        log.error("find_reachable_sinks(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# Tool G7: find_complexity_hints
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_complexity_hints(repo_name: str, min_severity: str = "medium") -> list[dict]:
+    """Return methods with complexity hints, sorted by CALLS in-degree descending.
+
+    Detects static complexity patterns stored on Method nodes during indexing:
+    O(n2)-candidate, O(n2)-list-scan, recursive, n+1-risk, unbounded-query.
+
+    Args:
+        repo_name:    Repository to query.
+        min_severity: Severity filter:
+                      ``"low"``    — include all hints
+                      ``"medium"`` — exclude hints that are ONLY ``recursive``
+                      ``"high"``   — only include hints containing ``O(n2)`` or ``n+1-risk``
+
+    Returns:
+        List of dicts: ``method_fqn``, ``file_path``, ``line_start``,
+        ``complexity_hint``, ``call_degree``.
+        Sorted by ``call_degree`` descending (most-called methods first).
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        # Resolve repo_id
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # Fetch all methods with a non-empty complexity_hint
+        r_m = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND m.complexity_hint <> '' "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.id, m.fqn, f.path, m.line_start, m.complexity_hint",
+            {"rid": repo_id},
+        )
+        methods_raw = _rows(r_m, ["method_id", "method_fqn", "file_path", "line_start", "complexity_hint"])
+
+        if not methods_raw:
+            return []
+
+        # Apply severity filter
+        filtered: list[dict] = []
+        for row in methods_raw:
+            hint = row["complexity_hint"]
+            if min_severity == "high":
+                if "O(n2)" not in hint and "n+1-risk" not in hint:
+                    continue
+            elif min_severity == "medium":
+                # Exclude if hint is ONLY "recursive"
+                tags = {t.strip() for t in hint.split(",") if t.strip()}
+                if tags == {"recursive"}:
+                    continue
+            # "low" includes everything
+            filtered.append(row)
+
+        if not filtered:
+            return []
+
+        # Compute call in-degree (number of incoming CALLS edges) for each method
+        r_deg = conn.execute(
+            "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
+            "WHERE callee.repo_id = $rid "
+            "RETURN callee.id, count(*) AS degree",
+            {"rid": repo_id},
+        )
+        degree_map: dict[str, int] = {}
+        while r_deg.has_next():
+            mid, deg = r_deg.get_next()
+            degree_map[mid] = deg
+
+        results: list[dict] = []
+        for row in filtered:
+            results.append({
+                "method_fqn": row["method_fqn"],
+                "file_path": row["file_path"],
+                "line_start": row["line_start"],
+                "complexity_hint": row["complexity_hint"],
+                "call_degree": degree_map.get(row["method_id"], 0),
+            })
+
+        results.sort(key=lambda x: x["call_degree"], reverse=True)
+        return results
+    except Exception as exc:
+        log.error("find_complexity_hints(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
 # Tool 11: index_repo_tool
 # ---------------------------------------------------------------------------
 

@@ -5,6 +5,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 
+from dedalus.complexity_pass import detect_complexity_hints
 from dedalus.language import ExtractResult, register
 
 # ---------------------------------------------------------------------------
@@ -32,6 +33,11 @@ _CHAIN_METHOD_TO_HTTP: dict[str, str] = {
 }
 
 _REST_CLIENT_ROOTS = {"restClient", "webClient", "restTemplate", "RestClient", "WebClient", "RestTemplate"}
+
+# Annotations that mark a Kotlin method as a messaging/scheduling entry point
+_ENTRY_POINT_ANNOTATIONS: frozenset[str] = frozenset(
+    {"KafkaListener", "Scheduled", "JmsListener", "RabbitListener"}
+)
 
 _KOTLIN_DATA_GENERATED_NAMES: frozenset[str] = frozenset({
     "copy", "toString", "hashCode", "equals"
@@ -404,6 +410,8 @@ class KotlinExtractor:
                     "is_suspend": False,
                     "annotations": [],
                     "generated": True,
+                    "is_entry_point": False,
+                    "complexity_hint": "",
                 })
 
             # Extract EXTENDS/IMPLEMENTS inheritance edges (class and object only)
@@ -440,6 +448,31 @@ class KotlinExtractor:
                 line_start = fn_node.start_point[0] + 1  # 1-based
                 generated = _is_kotlin_data_generated(fn_name, data_class)
 
+                # Determine if this method is an entry point
+                fn_ann_set = set(fn_annotations)
+                fn_is_entry_point = bool(
+                    fn_ann_set & _ENTRY_POINT_ANNOTATIONS
+                    or fn_ann_set & set(_MAPPING_TO_METHOD.keys())
+                )
+
+                # Extract parameter names for complexity pass
+                fn_param_names: list[str] = []
+                fn_params = _child_by_type(fn_node, "function_value_parameters")
+                if fn_params:
+                    for fp in fn_params.children:
+                        if fp.type == "function_value_parameter":
+                            param_node = _child_by_type(fp, "parameter")
+                            if param_node:
+                                sid = _child_by_type(param_node, "simple_identifier")
+                                if sid:
+                                    fn_param_names.append(_node_text(sid, src).strip())
+
+                # Find function body for complexity pass
+                fn_body = _child_by_type(fn_node, "function_body")
+                fn_complexity_hint = detect_complexity_hints(
+                    fn_body, src, fn_name, fn_param_names, "kotlin"
+                )
+
                 method_id = str(uuid.uuid4())
                 methods.append({
                     "id": method_id,
@@ -452,6 +485,8 @@ class KotlinExtractor:
                     "is_suspend": is_suspend,
                     "annotations": fn_annotations,
                     "generated": generated,
+                    "is_entry_point": fn_is_entry_point,
+                    "complexity_hint": fn_complexity_hint,
                 })
 
                 # Detect endpoint annotations
@@ -472,7 +507,6 @@ class KotlinExtractor:
                         })
 
                 # Detect RestClient / WebClient calls in the function body
-                fn_body = _child_by_type(fn_node, "function_body")
                 if fn_body:
                     rc = _find_rest_calls_in_node(fn_body, src, method_id, repo_id)
                     rest_calls.extend(rc)
@@ -510,6 +544,31 @@ class KotlinExtractor:
                 is_suspend = _is_suspend(fn_modifiers, src)
                 line_start = fn_node.start_point[0] + 1  # 1-based
 
+                # Determine if this top-level function is an entry point
+                tl_ann_set = set(fn_annotations)
+                tl_is_entry_point = bool(
+                    tl_ann_set & _ENTRY_POINT_ANNOTATIONS
+                    or tl_ann_set & set(_MAPPING_TO_METHOD.keys())
+                )
+
+                # Extract parameter names for complexity pass
+                tl_param_names: list[str] = []
+                tl_fn_params = _child_by_type(fn_node, "function_value_parameters")
+                if tl_fn_params:
+                    for fp in tl_fn_params.children:
+                        if fp.type == "function_value_parameter":
+                            param_node = _child_by_type(fp, "parameter")
+                            if param_node:
+                                sid = _child_by_type(param_node, "simple_identifier")
+                                if sid:
+                                    tl_param_names.append(_node_text(sid, src).strip())
+
+                # Find function body for complexity pass
+                tl_fn_body = _child_by_type(fn_node, "function_body")
+                tl_complexity_hint = detect_complexity_hints(
+                    tl_fn_body, src, fn_name, tl_param_names, "kotlin"
+                )
+
                 method_id = str(uuid.uuid4())
                 methods.append({
                     "id": method_id,
@@ -522,12 +581,13 @@ class KotlinExtractor:
                     "is_suspend": is_suspend,
                     "annotations": fn_annotations,
                     "generated": False,
+                    "is_entry_point": tl_is_entry_point,
+                    "complexity_hint": tl_complexity_hint,
                 })
 
                 # Detect RestClient / WebClient calls in top-level function body
-                fn_body = _child_by_type(fn_node, "function_body")
-                if fn_body:
-                    rc = _find_rest_calls_in_node(fn_body, src, method_id, repo_id)
+                if tl_fn_body:
+                    rc = _find_rest_calls_in_node(tl_fn_body, src, method_id, repo_id)
                     rest_calls.extend(rc)
 
         return ExtractResult(

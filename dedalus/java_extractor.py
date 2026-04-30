@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .complexity_pass import detect_complexity_hints
 from .language import ExtractResult, register
 from .path_utils import compile_path_regex
 
@@ -18,6 +19,11 @@ _ENDPOINT_ANNOTATIONS: dict[str, str] = {
     "PatchMapping": "PATCH",
     "RequestMapping": "GET",  # default; overridden by method= attribute if present
 }
+
+# Annotations that mark a method as a messaging/scheduling entry point
+_ENTRY_POINT_ANNOTATIONS: frozenset[str] = frozenset(
+    {"KafkaListener", "Scheduled", "JmsListener", "RabbitListener"}
+)
 
 # RestTemplate / WebClient / RestClient method names mapped to HTTP methods
 _REST_METHOD_MAP: dict[str, str] = {
@@ -765,6 +771,8 @@ class JavaExtractor:
                     "is_suspend": False,
                     "annotations": [],
                     "generated": True,
+                    "is_entry_point": False,
+                    "complexity_hint": "",
                 }
             )
 
@@ -855,6 +863,34 @@ class JavaExtractor:
 
         generated = _is_lombok_generated(method_name, class_annotations or [])
 
+        # Determine if this method is an entry point:
+        # - HTTP handler methods (have an endpoint annotation)
+        # - Kafka consumers, scheduled tasks, JMS/RabbitMQ listeners
+        ann_set = set(annotations)
+        is_entry_point = bool(
+            ann_set & _ENTRY_POINT_ANNOTATIONS
+            or ann_set & set(_ENDPOINT_ANNOTATIONS.keys())
+        )
+
+        # Extract parameter names for complexity pass
+        param_names: list[str] = []
+        params_node = _find_first_child_of_type(method_node, "formal_parameters")
+        if params_node:
+            for param in params_node.children:
+                if param.type == "formal_parameter":
+                    pname = _find_first_child_of_type(param, "identifier")
+                    if pname:
+                        param_names.append(_text(pname, source_bytes))
+
+        # Find method body for complexity pass
+        body_node = method_node.child_by_field_name("body")
+        if body_node is None:
+            body_node = _find_first_child_of_type(method_node, "block")
+
+        complexity_hint = detect_complexity_hints(
+            body_node, source_bytes, method_name, param_names, "java"
+        )
+
         method_id = str(uuid.uuid4())
         result.methods.append(
             {
@@ -868,6 +904,8 @@ class JavaExtractor:
                 "is_suspend": False,
                 "annotations": annotations,
                 "generated": generated,
+                "is_entry_point": is_entry_point,
+                "complexity_hint": complexity_hint,
             }
         )
 
@@ -896,9 +934,6 @@ class JavaExtractor:
                         )
 
         # Scan method body for RestTemplate/WebClient/RestClient calls
-        body_node = method_node.child_by_field_name("body")
-        if body_node is None:
-            body_node = _find_first_child_of_type(method_node, "block")
         if body_node:
             self._extract_rest_calls(
                 body_node, source_bytes, method_id, repo_id, result,
