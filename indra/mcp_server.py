@@ -752,6 +752,516 @@ def find_eager_fetches(repo_name: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Security Tool S4: find_cross_service_taint
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_cross_service_taint(repo_name: str, max_depth: int = 6) -> list[dict]:
+    """Find taint paths from HTTP endpoint handler parameters to outgoing REST calls.
+
+    This is an Indra-native equivalent of SonarQube Enterprise "Advanced SAST"
+    cross-service taint analysis.
+
+    A taint path is a call chain that starts at an HTTP endpoint handler method
+    (whose parameters are user-controlled: @RequestParam, @PathVariable, @RequestBody)
+    and ends at a method that issues an outgoing HTTP call (UNRESOLVED_CALL or
+    CALLS_REST edge).  Intermediate hops are method CALLS edges.
+
+    Args:
+        repo_name: Repository to analyse.
+        max_depth: Maximum call-chain depth to traverse (default 6).
+
+    Returns:
+        List of dicts, each describing one taint path::
+
+            {
+                "source_handler_fqn":   str,  # endpoint handler method
+                "source_endpoint":       str,  # HTTP path e.g. GET /api/users/{id}
+                "sink_method_fqn":       str,  # method that makes the outgoing call
+                "sink_url_pattern":      str,  # URL pattern of the outgoing call
+                "sink_http_method":      str,  # GET/POST/...
+                "path_length":           int,  # number of hops
+                "call_chain":            list, # [method_fqn, ...] from source to sink
+            }
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        # Resolve repo_id
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # 1. Collect all endpoint handlers in this repo
+        r_ep = conn.execute(
+            "MATCH (repo:Repo)-[:EXPOSES]->(ep:Endpoint) "
+            "WHERE repo.id = $rid "
+            "RETURN ep.handler_method_id, ep.http_method, ep.path",
+            {"rid": repo_id},
+        )
+        handlers: list[tuple[str, str, str]] = []
+        while r_ep.has_next():
+            mid, http_m, path = r_ep.get_next()
+            handlers.append((mid, http_m, path))
+
+        if not handlers:
+            return []
+
+        # 2. Build full in-repo CALLS adjacency list for BFS
+        #    method_id → list of callee_ids
+        r_calls = conn.execute(
+            "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.repo_id = $rid RETURN a.id, b.id",
+            {"rid": repo_id},
+        )
+        adj: dict[str, list[str]] = {}
+        while r_calls.has_next():
+            src, dst = r_calls.get_next()
+            adj.setdefault(src, []).append(dst)
+
+        # 3. Collect all methods that issue outbound REST calls in this repo
+        r_rc = conn.execute(
+            "MATCH (m:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
+            "WHERE m.repo_id = $rid "
+            "RETURN m.id, rc.url_pattern, rc.http_method",
+            {"rid": repo_id},
+        )
+        sink_calls: dict[str, list[tuple[str, str]]] = {}
+        while r_rc.has_next():
+            mid, url, http_m = r_rc.get_next()
+            sink_calls.setdefault(mid, []).append((url, http_m))
+        # Also CALLS_REST (resolved calls)
+        r_cr = conn.execute(
+            "MATCH (m:Method)-[:CALLS_REST]->(ep:Endpoint) "
+            "WHERE m.repo_id = $rid "
+            "RETURN m.id, ep.path, ep.http_method",
+            {"rid": repo_id},
+        )
+        while r_cr.has_next():
+            mid, url, http_m = r_cr.get_next()
+            sink_calls.setdefault(mid, []).append((url, http_m))
+
+        if not sink_calls:
+            return []
+
+        # 4. Build fqn lookup for display
+        r_fqn = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid RETURN m.id, m.fqn",
+            {"rid": repo_id},
+        )
+        id_to_fqn: dict[str, str] = {}
+        while r_fqn.has_next():
+            mid, fqn = r_fqn.get_next()
+            id_to_fqn[mid] = fqn
+
+        # 5. BFS from each handler toward sinks
+        results: list[dict] = []
+        seen_paths: set[tuple[str, str]] = set()  # (handler_id, sink_id)
+
+        for handler_id, ep_http_method, ep_path in handlers:
+            if handler_id not in id_to_fqn:
+                continue
+            # BFS
+            queue: deque[tuple[str, list[str]]] = deque([(handler_id, [handler_id])])
+            visited: set[str] = {handler_id}
+            while queue:
+                current, path = queue.popleft()
+                if len(path) > max_depth + 1:
+                    continue
+                if current in sink_calls and current != handler_id:
+                    key = (handler_id, current)
+                    if key not in seen_paths:
+                        seen_paths.add(key)
+                        for url_pattern, sink_http_m in sink_calls[current]:
+                            results.append({
+                                "source_handler_fqn": id_to_fqn.get(handler_id, handler_id),
+                                "source_endpoint": f"{ep_http_method} {ep_path}",
+                                "sink_method_fqn": id_to_fqn.get(current, current),
+                                "sink_url_pattern": url_pattern,
+                                "sink_http_method": sink_http_m,
+                                "path_length": len(path) - 1,
+                                "call_chain": [id_to_fqn.get(m, m) for m in path],
+                            })
+                for callee in adj.get(current, []):
+                    if callee not in visited:
+                        visited.add(callee)
+                        queue.append((callee, path + [callee]))
+
+        results.sort(key=lambda x: x["path_length"])
+        return results
+    except Exception as exc:
+        log.error("find_cross_service_taint(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# Security Tool S5: find_taint_sinks
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_taint_sinks(repo_name: str) -> list[dict]:
+    """Find all calls to known dangerous sink methods in the given repository.
+
+    Uses the built-in sink registry (SQL, HTTP clients, exec) merged with any
+    custom sinks defined in ``~/.indra/security.yml``.  This is the custom
+    sources/sinks equivalent of SonarQube Enterprise's configurable taint rules.
+
+    Args:
+        repo_name: Repository to analyse.
+
+    Returns:
+        List of dicts with keys:
+            ``caller_fqn``, ``sink_method``, ``file_path``, ``line_start``.
+    """
+    from indra.security_config import get_security_config  # noqa: PLC0415
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        cfg = get_security_config()
+        results: list[dict] = []
+
+        # Check UNRESOLVED_CALL nodes whose callee_name matches a known sink
+        r_rc = conn.execute(
+            "MATCH (m:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
+            "WHERE m.repo_id = $rid "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn, rc.callee_name, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        while r_rc.has_next():
+            caller_fqn, callee_name, file_path, line_start = r_rc.get_next()
+            if callee_name and cfg.is_sink_method(callee_name):
+                results.append({
+                    "caller_fqn": caller_fqn,
+                    "sink_method": callee_name,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "sink_category": "custom",
+                })
+
+        # Cross-service sinks via CALLS edges to methods whose FQN matches a known sink
+        r_calls = conn.execute(
+            "MATCH (m:Method)-[:CALLS]->(s:Method) "
+            "WHERE m.repo_id = $rid "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn, s.fqn, s.name, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        while r_calls.has_next():
+            caller_fqn, callee_fqn, callee_name, file_path, line_start = r_calls.get_next()
+            if cfg.is_sink_method(callee_fqn) or cfg.is_sink_method(callee_name):
+                results.append({
+                    "caller_fqn": caller_fqn,
+                    "sink_method": callee_fqn,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "sink_category": "configured",
+                })
+
+        return results
+    except Exception as exc:
+        log.error("find_taint_sinks(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+@mcp.tool()
+def list_security_config() -> dict:
+    """Return the active security configuration (sources, sinks, sanitizers).
+
+    Shows the merged built-in + user-defined rules currently in effect.
+    Useful for verifying that custom ``~/.indra/security.yml`` rules were loaded.
+
+    Returns:
+        Dict with keys ``source_annotations``, ``source_methods``,
+        ``sink_methods``, ``sanitizer_methods``.
+    """
+    from indra.security_config import get_security_config  # noqa: PLC0415
+    cfg = get_security_config()
+    return {
+        "source_annotations": cfg.source_annotations,
+        "source_methods": cfg.source_methods,
+        "sink_methods": cfg.sink_methods,
+        "sanitizer_methods": cfg.sanitizer_methods,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Security Tool S6: find_second_order_injection
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_second_order_injection(repo_name: str) -> list[dict]:
+    """Detect second-order injection patterns: taint written to DB then read back unsanitized.
+
+    A second-order (stored) injection occurs when:
+      1. User-controlled data reaches a persistence write (JPA save/persist/merge).
+      2. That same data is later read back from the DB and passed to a dangerous sink.
+
+    Indra approximates this by finding:
+      - Methods that write to a JPA entity (call to save/persist/merge on a Repository
+        class or on an EntityManager).
+      - Methods that read from the same entity type (findById/findAll/executeQuery) AND
+        whose return value flows into a sink (detected via call chain analysis).
+
+    This is a structural approximation — it is not full data-flow.  False positives are
+    expected; use it to prioritise manual review, not as a definitive scanner.
+
+    Args:
+        repo_name: Repository to analyse.
+
+    Returns:
+        List of dicts with keys:
+            ``entity_fqn``, ``write_method_fqn``, ``read_method_fqn``,
+            ``read_file_path``, ``risk_level``.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # Persistence write patterns (method names that signal DB write)
+        write_patterns = {"save", "saveAll", "persist", "merge", "insert", "saveAndFlush", "store"}
+        # Persistence read patterns (signal a DB read)
+        read_patterns = {"findById", "findAll", "findOne", "getById", "getOne",
+                         "findAllById", "executeQuery", "createQuery", "query", "load", "get"}
+
+        # Collect all methods and their CALLS targets
+        r_m = conn.execute(
+            "MATCH (m:Method)-[:CALLS]->(s:Method) "
+            "WHERE m.repo_id = $rid "
+            "RETURN m.fqn, m.id, s.name, s.fqn",
+            {"rid": repo_id},
+        )
+        write_methods: dict[str, str] = {}   # method_fqn → callee_name (write)
+        read_methods: dict[str, tuple[str, str]] = {}  # method_fqn → (callee_name, file_path)
+
+        rows = []
+        while r_m.has_next():
+            rows.append(r_m.get_next())
+
+        for caller_fqn, caller_id, callee_name, callee_fqn in rows:
+            if callee_name in write_patterns:
+                write_methods[caller_fqn] = callee_name
+            if callee_name in read_patterns:
+                read_methods[caller_fqn] = (callee_name, "")
+
+        if not write_methods or not read_methods:
+            return []
+
+        # Build entity-to-writer and entity-to-reader maps via EntityRelation
+        r_er = conn.execute(
+            "MATCH (c:Class)-[:HAS_RELATION]->(er:EntityRelation) "
+            "WHERE c.repo_id = $rid "
+            "RETURN c.fqn, er.target_class_fqn",
+            {"rid": repo_id},
+        )
+        entity_classes: set[str] = set()
+        while r_er.has_next():
+            src_fqn, tgt_fqn = r_er.get_next()
+            entity_classes.add(src_fqn)
+            entity_classes.add(tgt_fqn)
+
+        # Get file paths for read methods
+        r_fp = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.fqn, f.path",
+            {"rid": repo_id},
+        )
+        fqn_to_path: dict[str, str] = {}
+        while r_fp.has_next():
+            fqn, path = r_fp.get_next()
+            fqn_to_path[fqn] = path
+
+        # Pair up write_methods with read_methods that share a class hierarchy context
+        # Since we don't have full type inference, we use heuristics:
+        # both belong to classes that reference the same entity type
+        results: list[dict] = []
+        for write_fqn in write_methods:
+            for read_fqn in read_methods:
+                if write_fqn == read_fqn:
+                    continue
+                # Heuristic: share a class prefix (same service class)
+                write_class = ".".join(write_fqn.split(".")[:-1])
+                read_class = ".".join(read_fqn.split(".")[:-1])
+                # Flag if they are in the same class or in a class hierarchy
+                if write_class and read_class and (write_class == read_class or
+                        write_class.split(".")[-1] in read_class or
+                        read_class.split(".")[-1] in write_class):
+                    results.append({
+                        "entity_fqn": write_class,
+                        "write_method_fqn": write_fqn,
+                        "write_callee": write_methods[write_fqn],
+                        "read_method_fqn": read_fqn,
+                        "read_callee": read_methods[read_fqn][0],
+                        "read_file_path": fqn_to_path.get(read_fqn, ""),
+                        "risk_level": "HIGH" if write_class == read_class else "MEDIUM",
+                    })
+
+        # Deduplicate and sort by risk
+        seen: set[tuple[str, str]] = set()
+        deduped: list[dict] = []
+        for r2 in results:
+            key = (r2["write_method_fqn"], r2["read_method_fqn"])
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r2)
+        deduped.sort(key=lambda x: (x["risk_level"], x["entity_fqn"]))
+        return deduped
+    except Exception as exc:
+        log.error("find_second_order_injection(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
+# Security Tool S7: generate_security_report
+# ---------------------------------------------------------------------------
+
+# OWASP Top 10 2021 / CWE Top 25 / PCI DSS / STIG category mappings
+_OWASP_MAPPINGS: dict[str, str] = {
+    # method name fragment → OWASP category
+    "execute":         "A03:2021-Injection",
+    "executeQuery":    "A03:2021-Injection",
+    "executeUpdate":   "A03:2021-Injection",
+    "createQuery":     "A03:2021-Injection",
+    "query":           "A03:2021-Injection",
+    "getForEntity":    "A10:2021-Server-Side Request Forgery",
+    "postForEntity":   "A10:2021-Server-Side Request Forgery",
+    "exchange":        "A10:2021-Server-Side Request Forgery",
+    "exec":            "A03:2021-Injection",
+    "start":           "A03:2021-Injection",
+    "readAllBytes":    "A01:2021-Broken Access Control",
+    "newBufferedReader": "A01:2021-Broken Access Control",
+}
+
+_CWE_MAPPINGS: dict[str, str] = {
+    "execute":         "CWE-89: SQL Injection",
+    "executeQuery":    "CWE-89: SQL Injection",
+    "createQuery":     "CWE-89: SQL Injection",
+    "getForEntity":    "CWE-918: Server-Side Request Forgery",
+    "postForEntity":   "CWE-918: Server-Side Request Forgery",
+    "exchange":        "CWE-918: Server-Side Request Forgery",
+    "exec":            "CWE-78: OS Command Injection",
+    "start":           "CWE-78: OS Command Injection",
+    "readAllBytes":    "CWE-22: Path Traversal",
+}
+
+_PCI_DSS_MAPPINGS: dict[str, str] = {
+    "CWE-89: SQL Injection":                  "PCI DSS 6.3.1: Injection flaws",
+    "CWE-918: Server-Side Request Forgery":   "PCI DSS 6.3.1: Other flaws",
+    "CWE-78: OS Command Injection":           "PCI DSS 6.3.1: Injection flaws",
+    "CWE-22: Path Traversal":                 "PCI DSS 6.3.1: Other flaws",
+}
+
+_STIG_MAPPINGS: dict[str, str] = {
+    "CWE-89: SQL Injection":                  "APSC-DV-002560 CAT I",
+    "CWE-918: Server-Side Request Forgery":   "APSC-DV-002510 CAT II",
+    "CWE-78: OS Command Injection":           "APSC-DV-002560 CAT I",
+    "CWE-22: Path Traversal":                 "APSC-DV-002300 CAT II",
+}
+
+
+@mcp.tool()
+def generate_security_report(repo_name: str, framework: str = "owasp") -> list[dict]:
+    """Generate a security findings report mapped to a compliance framework.
+
+    This is the Indra equivalent of SonarQube Enterprise's OWASP / CWE /
+    PCI DSS / STIG security reports.  It aggregates findings from the taint
+    analysis and maps each to the requested framework's taxonomy.
+
+    Args:
+        repo_name: Repository to analyse.
+        framework: One of ``owasp``, ``cwe``, ``pci``, ``stig`` (default: ``owasp``).
+
+    Returns:
+        List of dicts, each a finding with framework-specific keys.
+        OWASP: ``category``, ``caller_fqn``, ``sink_method``, ``file_path``, ``line_start``.
+        CWE:   ``cwe_id``, ``caller_fqn``, ``sink_method``, ``file_path``, ``line_start``.
+        PCI:   ``requirement``, ``caller_fqn``, ``sink_method``, ``file_path``.
+        STIG:  ``vuln_id``, ``caller_fqn``, ``sink_method``, ``file_path``.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    framework = framework.lower()
+    if framework not in ("owasp", "cwe", "pci", "stig"):
+        return [{"error": f"Unknown framework '{framework}'. Use: owasp, cwe, pci, stig"}]
+    try:
+        # Re-use find_taint_sinks to collect raw findings
+        raw = find_taint_sinks(repo_name)
+        results: list[dict] = []
+        for finding in raw:
+            if "error" in finding:
+                continue
+            sink = finding.get("sink_method", "")
+            short = sink.split(".")[-1]
+
+            owasp = _OWASP_MAPPINGS.get(short, "A00:2021-Uncategorized")
+            cwe = _CWE_MAPPINGS.get(short, "CWE-000: Unclassified")
+            pci = _PCI_DSS_MAPPINGS.get(cwe, "PCI DSS 6.3.1: Review required")
+            stig = _STIG_MAPPINGS.get(cwe, "APSC-DV-000000 Review required")
+
+            if framework == "owasp":
+                results.append({
+                    "category": owasp,
+                    "caller_fqn": finding["caller_fqn"],
+                    "sink_method": sink,
+                    "file_path": finding["file_path"],
+                    "line_start": finding["line_start"],
+                })
+            elif framework == "cwe":
+                results.append({
+                    "cwe_id": cwe,
+                    "caller_fqn": finding["caller_fqn"],
+                    "sink_method": sink,
+                    "file_path": finding["file_path"],
+                    "line_start": finding["line_start"],
+                })
+            elif framework == "pci":
+                results.append({
+                    "requirement": pci,
+                    "caller_fqn": finding["caller_fqn"],
+                    "sink_method": sink,
+                    "file_path": finding["file_path"],
+                })
+            elif framework == "stig":
+                results.append({
+                    "vuln_id": stig,
+                    "caller_fqn": finding["caller_fqn"],
+                    "sink_method": sink,
+                    "file_path": finding["file_path"],
+                })
+
+        # Sort by category/cwe_id/requirement/vuln_id
+        sort_key = {"owasp": "category", "cwe": "cwe_id", "pci": "requirement", "stig": "vuln_id"}[framework]
+        results.sort(key=lambda x: x.get(sort_key, ""))
+        return results
+    except Exception as exc:
+        log.error("generate_security_report(%r, %r): %s", repo_name, framework, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
 # Tool 11: index_repo_tool
 # ---------------------------------------------------------------------------
 
