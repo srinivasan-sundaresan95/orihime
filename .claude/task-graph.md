@@ -1,4 +1,4 @@
-# Indra Task Graph
+# Dedalus Task Graph
 
 ## Dependency chain (linear)
 
@@ -19,7 +19,7 @@ T4 (Schema)
                                                                           └── T6 (MCP: errors+register)
                                                                                 └── T7 (MOSS check) ← legal gate
                                                                                       └── T8 (Benefit: baseline tokens)
-                                                                                            └── T9 (Benefit: Indra tokens)
+                                                                                            └── T9 (Benefit: Dedalus tokens)
                                                                                                   └── T10 (Benefit: accuracy)
                                                                                                         └── T11 (Benefit: speed)
                                                                                                               └── T12 (Benefit: PR cost estimate)
@@ -88,11 +88,11 @@ def registered_extensions() -> dict[str, str]:   # ext → lang
 | T6 | MCP 4.3 | Error handling + Claude Code registration | 4.3.1–4.3.4 |
 | T7 | MOSS | Similarity check vs GitNexus, fix if >20% | 6.1–6.8 |
 | T8 | Benefit | Token baseline: plain Claude, 5 questions | 16.1–16.7 |
-| T9 | Benefit | Token with Indra: same 5 questions via MCP | 17.1–17.5 |
+| T9 | Benefit | Token with Dedalus: same 5 questions via MCP | 17.1–17.5 |
 | T10 | Benefit | Accuracy comparison + hallucination examples | 18.1–18.5 |
 | T11 | Benefit | Speed comparison (p50/p95, amortized index) | 19.1–19.4 |
 | T12 | Benefit | PR cost estimate: 4 repos, git log, sensitivity | 20.1–20.7 |
-| T13 | Benefit | Write report → Downloads/indra-cost-savings-report.md | 21.1–21.6 |
+| T13 | Benefit | Write report → Downloads/dedalus-cost-savings-report.md | 21.1–21.6 |
 
 ## Quick lookup: step detail
 
@@ -167,7 +167,7 @@ def registered_extensions() -> dict[str, str]:   # ext → lang
 2.6.3 upsert Repo node; delete existing nodes/edges for repo_id
 2.6.4 walk → for each (path, lang) call get_extractor(lang).extract() → write nodes
 2.6.5 call resolver → write CALLS + UNRESOLVED_CALL
-2.6.6 __main__.py CLI: --repo --name --db (default ~/.indra/indra.db)
+2.6.6 __main__.py CLI: --repo --name --db (default ~/.dedalus/dedalus.db)
 
 ### T18 Indexer integration tests (2.7.1–2.7.4)
 2.7.1 test_integration_bff.py — MATCH (m:Method) count > 50
@@ -217,14 +217,14 @@ def registered_extensions() -> dict[str, str]:   # ext → lang
 ### T6 MCP errors+register (4.3.1–4.3.4)
 4.3.1 wrap all handlers in try/except → structured error JSON
 4.3.2 input validation (empty fqn/path)
-4.3.3 add indra to ~/.claude/settings.json mcpServers
+4.3.3 add dedalus to ~/.claude/settings.json mcpServers
 4.3.4 test from Claude Code: list_endpoints("point-bank-bff") returns data
 → END (T16+T5+T6): write docs/mcp-server.md
 
 ### T7 MOSS (6.1–6.8)
 6.1 install MOSS client
 6.2 collect GitNexus .js/.ts into /tmp/gitnexus_src/
-6.3 submit Indra .py vs GitNexus via MOSS
+6.3 submit Dedalus .py vs GitNexus via MOSS
 6.4 review report; record similarity % per pair
 6.5 flag pairs >20%
 6.6 rewrite flagged segments
@@ -237,4 +237,4 @@ T9 17.1–17.5: index bitcoin; same 5 questions via MCP; record tokens; compute 
 T10 18.1–18.5: ground-truth verification; score both; document hallucination examples
 T11 19.1–19.4: wall-clock latency p50/p95 both; amortize indexing over 100q/month
 T12 20.1–20.7: git log 4 repos; PRs/year; 3q/PR × savings; ¥ table; sensitivity low/mid/high
-T13 21.1–21.6: compile report → Downloads/indra-cost-savings-report.md
+T13 21.1–21.6: compile report → Downloads/dedalus-cost-savings-report.md

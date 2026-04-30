@@ -57,9 +57,9 @@ The orchestrator calls `get_extractor(lang).extract(...)` — no language dispat
 See `docs/adding-a-language.md` (written at end of T21) for the full guide. Summary:
 
 1. `pip install tree-sitter-<language>`
-2. Create `indra/<language>_extractor.py` implementing `LanguageExtractor`
+2. Create `dedalus/<language>_extractor.py` implementing `LanguageExtractor`
 3. Call `register(<LanguageExtractor>())` at module bottom
-4. Import the module in `indra/__init__.py` to trigger registration
+4. Import the module in `dedalus/__init__.py` to trigger registration
 5. Add fixture files to `tests/fixtures/`
 6. Write `test_<language>_extractor.py`
 
@@ -69,7 +69,7 @@ No changes to walker, orchestrator, resolver, MCP server, or schema.
 
 Python `Protocol` is structural — an extractor doesn't need to inherit from a base class. This means:
 
-- Third-party contributors can implement an extractor without importing from `indra`
+- Third-party contributors can implement an extractor without importing from `dedalus`
 - The orchestrator accepts any object that satisfies the shape, not one that inherits a specific class
 - Tests can use simple mock objects without subclassing
 

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from indra.kotlin_extractor import _is_kotlin_data_generated, KotlinExtractor
-from indra.language import get_parser
+from dedalus.kotlin_extractor import _is_kotlin_data_generated, KotlinExtractor
+from dedalus.language import get_parser
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures"
 

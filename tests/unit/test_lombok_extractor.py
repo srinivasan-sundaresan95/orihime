@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import indra.java_extractor  # noqa: F401 — triggers register()
-from indra.java_extractor import JavaExtractor
-from indra.language import get_parser
+import dedalus.java_extractor  # noqa: F401 — triggers register()
+from dedalus.java_extractor import JavaExtractor
+from dedalus.language import get_parser
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures"
 

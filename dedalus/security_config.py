@@ -1,7 +1,7 @@
 """Security configuration: custom taint sources, sinks, and sanitizers.
 
-Indra loads security rules from ``~/.indra/security.yml`` (or the path in
-``INDRA_SECURITY_CONFIG``).  The file is optional — if absent or empty, only
+Dedalus loads security rules from ``~/.dedalus/security.yml`` (or the path in
+``DEDALUS_SECURITY_CONFIG``).  The file is optional — if absent or empty, only
 the built-in annotation-based rules apply.
 
 YAML schema::
@@ -173,11 +173,11 @@ def load_security_config(config_path: str | Path | None = None) -> SecurityConfi
     ----------
     config_path:
         Path to the YAML config file.  Defaults to
-        ``$INDRA_SECURITY_CONFIG`` or ``~/.indra/security.yml``.
+        ``$DEDALUS_SECURITY_CONFIG`` or ``~/.dedalus/security.yml``.
     """
     if config_path is None:
         config_path = Path(
-            os.environ.get("INDRA_SECURITY_CONFIG", str(Path.home() / ".indra" / "security.yml"))
+            os.environ.get("DEDALUS_SECURITY_CONFIG", str(Path.home() / ".dedalus" / "security.yml"))
         )
     user = _load_yaml_config(Path(config_path))
 

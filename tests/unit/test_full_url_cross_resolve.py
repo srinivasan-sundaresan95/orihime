@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from indra.cross_resolver import _strip_scheme_host
-from indra.path_utils import compile_path_regex, match_url_pattern
+from dedalus.cross_resolver import _strip_scheme_host
+from dedalus.path_utils import compile_path_regex, match_url_pattern
 
 
 # ---------------------------------------------------------------------------

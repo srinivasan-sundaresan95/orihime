@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from indra.language import registered_extensions
+from dedalus.language import registered_extensions
 
 _SKIP_DIRS = {
     "build", "out", "generated", ".gradle", ".git",

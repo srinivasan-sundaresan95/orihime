@@ -1,11 +1,11 @@
-"""Kotlin tree-sitter extractor for the Indra code knowledge graph."""
+"""Kotlin tree-sitter extractor for the Dedalus code knowledge graph."""
 from __future__ import annotations
 
 import re
 import uuid
 from dataclasses import dataclass, field
 
-from indra.language import ExtractResult, register
+from dedalus.language import ExtractResult, register
 
 # ---------------------------------------------------------------------------
 # Spring endpoint annotation → HTTP method mapping

@@ -1,11 +1,11 @@
-"""Unit tests for indra.language — ExtractResult, registry, and parser helpers."""
+"""Unit tests for dedalus.language — ExtractResult, registry, and parser helpers."""
 from __future__ import annotations
 
 import dataclasses
 
 import pytest
 
-from indra.language import (
+from dedalus.language import (
     ExtractResult,
     LanguageExtractor,
     get_extractor,
@@ -111,7 +111,7 @@ def test_registered_extensions_includes_registered() -> None:
 
 
 def test_registered_extensions_includes_java_and_kotlin() -> None:
-    """After importing indra (with extractors), 'java' and 'kotlin' must appear in registered_extensions()."""
+    """After importing dedalus (with extractors), 'java' and 'kotlin' must appear in registered_extensions()."""
     langs = set(registered_extensions().values())
     assert "java" in langs, f"'java' not found in registered language names: {langs}"
     assert "kotlin" in langs, f"'kotlin' not found in registered language names: {langs}"

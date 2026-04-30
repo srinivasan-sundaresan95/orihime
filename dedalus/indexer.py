@@ -37,13 +37,13 @@ from pathlib import Path
 
 import kuzu
 
-import indra.java_extractor  # noqa: F401 — side-effect: registers JavaExtractor
-import indra.kotlin_extractor  # noqa: F401 — side-effect: registers KotlinExtractor
-from indra.language import get_extractor, get_parser
-from indra.parse_result import ParseResult
-from indra.resolver import build_fqn_index, resolve_calls
-from indra.schema import init_schema
-from indra.walker import walk_repo
+import dedalus.java_extractor  # noqa: F401 — side-effect: registers JavaExtractor
+import dedalus.kotlin_extractor  # noqa: F401 — side-effect: registers KotlinExtractor
+from dedalus.language import get_extractor, get_parser
+from dedalus.parse_result import ParseResult
+from dedalus.resolver import build_fqn_index, resolve_calls
+from dedalus.schema import init_schema
+from dedalus.walker import walk_repo
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +58,8 @@ def _build_constant_index(work_items: list[tuple]) -> dict[str, str]:
     endpoint annotations like @GetMapping(path = RequestMapping.WALLET_STATUS).
     """
     from pathlib import Path as _Path
-    from indra.language import get_parser as _get_parser
-    import indra.java_extractor as _jex
+    from dedalus.language import get_parser as _get_parser
+    import dedalus.java_extractor as _jex
 
     index: dict[str, str] = {}
     for file_path_str, lang, _file_id, _repo_id in work_items:
@@ -111,10 +111,10 @@ def _parse_file(args: tuple) -> ParseResult:
     # Import inside the function so child processes get a clean slate and we
     # avoid accidentally pickling module-level state.
     from pathlib import Path as _Path
-    from indra.language import get_parser as _get_parser, get_extractor as _get_extractor
+    from dedalus.language import get_parser as _get_parser, get_extractor as _get_extractor
     # Trigger extractor registration in the child process
-    import indra.java_extractor  # noqa: F401
-    import indra.kotlin_extractor  # noqa: F401
+    import dedalus.java_extractor  # noqa: F401
+    import dedalus.kotlin_extractor  # noqa: F401
 
     file_path = _Path(file_path_str)
     result = ParseResult(

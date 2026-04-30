@@ -1,14 +1,14 @@
 # Decision: Legal and Licensing
 
-## Why Indra exists
+## Why Dedalus exists
 
 GitNexus (https://github.com/abhigyanpatwari/GitNexus) provides similar functionality but is licensed under PolyForm Noncommercial. PolyForm Noncommercial prohibits use by for-profit corporations for any purpose. Using or forking GitNexus at Rakuten — even internally — would constitute a license violation.
 
-Indra is built from scratch using library documentation only (tree-sitter, KuzuDB, MCP SDK). No GitNexus source code was read during implementation.
+Dedalus is built from scratch using library documentation only (tree-sitter, KuzuDB, MCP SDK). No GitNexus source code was read during implementation.
 
-## License of Indra
+## License of Dedalus
 
-Indra uses only MIT/Apache-2.0 dependencies:
+Dedalus uses only MIT/Apache-2.0 dependencies:
 
 | Dependency | License |
 |------------|---------|
@@ -19,11 +19,11 @@ Indra uses only MIT/Apache-2.0 dependencies:
 | mcp | MIT |
 | pytest | MIT |
 
-Indra itself will be licensed MIT when shared.
+Dedalus itself will be licensed MIT when shared.
 
 ## MOSS similarity check (Step 6 / T7)
 
-Before sharing Indra with the team or publishing it, a MOSS (Measure of Software Similarity) check is run comparing Indra's `.py` files against GitNexus's `.js`/`.ts` source files. Threshold: 20% similarity per file pair.
+Before sharing Dedalus with the team or publishing it, a MOSS (Measure of Software Similarity) check is run comparing Dedalus's `.py` files against GitNexus's `.js`/`.ts` source files. Threshold: 20% similarity per file pair.
 
 The MOSS check result is documented in `MOSS_RESULT.md` at the repo root:
 - Date of check

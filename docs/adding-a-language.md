@@ -1,4 +1,4 @@
-# Adding a Language to Indra
+# Adding a Language to Dedalus
 
 This guide walks through adding support for a new programming language. The examples use `python` throughout; substitute your language name as needed.
 
@@ -6,7 +6,7 @@ This guide walks through adding support for a new programming language. The exam
 
 ## 1. How the Language Registry Works
 
-`indra/language.py` contains three cooperating pieces:
+`dedalus/language.py` contains three cooperating pieces:
 
 **`LanguageExtractor` Protocol** — any class with these attributes satisfies it:
 
@@ -40,7 +40,7 @@ pip install tree-sitter-python
 
 For other languages the pattern is always `tree-sitter-<lang>`. Check [PyPI](https://pypi.org/) for availability before proceeding. If no package exists, see section 4.
 
-After installing, add the grammar to `_LANGUAGE_FACTORIES` in `indra/language.py`:
+After installing, add the grammar to `_LANGUAGE_FACTORIES` in `dedalus/language.py`:
 
 ```python
 import tree_sitter_python
@@ -59,7 +59,7 @@ _LANGUAGE_FACTORIES: dict[str, object] = {
 Run this in a Python shell or a scratch script before writing any extractor code:
 
 ```python
-from indra.language import get_parser
+from dedalus.language import get_parser
 
 parser = get_parser("python")
 source = b"def hello(): pass"
@@ -73,14 +73,14 @@ Spend time reading the `sexp()` output. The node type names (e.g. `function_defi
 
 ---
 
-### Step 3 — Create `indra/python_extractor.py`
+### Step 3 — Create `dedalus/python_extractor.py`
 
 The file must define a class that satisfies the `LanguageExtractor` Protocol and call `register()` at module level.
 
 ```python
 from __future__ import annotations
 
-from indra.language import ExtractResult, LanguageExtractor, register
+from dedalus.language import ExtractResult, LanguageExtractor, register
 
 
 class PythonExtractor:
@@ -119,7 +119,7 @@ The `extract()` method receives the fully-parsed `tree_sitter.Tree`. Walk it by 
 
 ### Step 4 — What `extract()` must return
 
-`ExtractResult` is a dataclass with four `list[dict]` fields. Each dict becomes a node row in KuzuDB. The required keys for each list are defined by the schema in `indra/schema.py`.
+`ExtractResult` is a dataclass with four `list[dict]` fields. Each dict becomes a node row in KuzuDB. The required keys for each list are defined by the schema in `dedalus/schema.py`.
 
 See the full field reference in section 3 below.
 
@@ -137,15 +137,15 @@ See the full field reference in section 3 below.
 
 ### Step 5 — Register and wire the import
 
-At the bottom of `indra/python_extractor.py`, the `register(PythonExtractor())` call (already shown in the skeleton above) is enough to add the extractor to the registry at import time.
+At the bottom of `dedalus/python_extractor.py`, the `register(PythonExtractor())` call (already shown in the skeleton above) is enough to add the extractor to the registry at import time.
 
-Then add the import to `indra/__init__.py`:
+Then add the import to `dedalus/__init__.py`:
 
 ```python
-import indra.python_extractor  # registers PythonExtractor on import
+import dedalus.python_extractor  # registers PythonExtractor on import
 ```
 
-The file walker imports `indra` before scanning files, so this guarantees the extractor is available before any `.py` file is processed.
+The file walker imports `dedalus` before scanning files, so this guarantees the extractor is available before any `.py` file is processed.
 
 ---
 
@@ -178,8 +178,8 @@ from pathlib import Path
 
 import pytest
 
-import indra.python_extractor  # ensure registration side-effect runs
-from indra.language import get_extractor, get_parser
+import dedalus.python_extractor  # ensure registration side-effect runs
+from dedalus.language import get_extractor, get_parser
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.py"
 

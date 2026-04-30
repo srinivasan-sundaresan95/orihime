@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import pathlib
 
-import indra.java_extractor  # noqa: F401 — triggers register()
-from indra.java_extractor import JavaExtractor, _extract_static_final_strings
-from indra.language import get_parser
+import dedalus.java_extractor  # noqa: F401 — triggers register()
+from dedalus.java_extractor import JavaExtractor, _extract_static_final_strings
+from dedalus.language import get_parser
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 CONSTANTS_FILE = FIXTURES / "ConstantEndpoints.java"
@@ -19,7 +19,7 @@ def _build_constant_index() -> dict[str, str]:
     tree = parser.parse(src)
 
     # Walk for class_body nodes and extract static final strings
-    from indra.java_extractor import _walk_all, _text, _find_first_child_of_type
+    from dedalus.java_extractor import _walk_all, _text, _find_first_child_of_type
 
     constant_index: dict[str, str] = {}
     root = tree.root_node

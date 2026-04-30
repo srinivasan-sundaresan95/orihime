@@ -1,4 +1,4 @@
-"""Unit tests for indra.schema — all tests hit a real (temp-dir) KuzuDB instance."""
+"""Unit tests for dedalus.schema — all tests hit a real (temp-dir) KuzuDB instance."""
 from __future__ import annotations
 
 import tempfile
@@ -6,7 +6,7 @@ import tempfile
 import kuzu
 import pytest
 
-from indra.schema import SCHEMA_VERSION, create_schema, drop_schema, init_schema
+from dedalus.schema import SCHEMA_VERSION, create_schema, drop_schema, init_schema
 
 # ---------------------------------------------------------------------------
 # Helpers

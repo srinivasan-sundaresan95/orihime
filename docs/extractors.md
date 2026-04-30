@@ -8,7 +8,7 @@ An extractor parses a single source file using a Tree-sitter parse tree and prod
 
 ## Java extractor
 
-**File:** `indra/java_extractor.py`  
+**File:** `dedalus/java_extractor.py`  
 **Handles:** `.java`
 
 ### What it detects
@@ -68,7 +68,7 @@ The graph loader stores `DYNAMIC` as-is; the cross-repo resolver skips `DYNAMIC`
 
 ## Kotlin extractor
 
-**File:** `indra/kotlin_extractor.py`  
+**File:** `dedalus/kotlin_extractor.py`  
 **Handles:** `.kt`, `.kts`
 
 ### What it detects
@@ -124,7 +124,7 @@ If `uri(...)` is never called with a string literal, `url` remains `None` and no
 
 ## Shared `ExtractResult` schema
 
-`ExtractResult` is defined in `indra/language.py` as a dataclass with four `list[dict]` fields.
+`ExtractResult` is defined in `dedalus/language.py` as a dataclass with four `list[dict]` fields.
 
 ### `classes`
 
@@ -198,7 +198,7 @@ If `uri(...)` is never called with a string literal, `url` remains `None` and no
 
 ## Adding support for more Spring annotations
 
-### Java extractor (`indra/java_extractor.py`)
+### Java extractor (`dedalus/java_extractor.py`)
 
 Add the annotation name and HTTP verb to `_ENDPOINT_ANNOTATIONS` at the top of the file:
 
@@ -212,7 +212,7 @@ _ENDPOINT_ANNOTATIONS: dict[str, str] = {
 
 If the new annotation supports a `method=` attribute for verb override, extend `_infer_http_method_from_annotation` to handle it (currently only `RequestMapping` gets special treatment there).
 
-### Kotlin extractor (`indra/kotlin_extractor.py`)
+### Kotlin extractor (`dedalus/kotlin_extractor.py`)
 
 Add the annotation name and HTTP verb to `_MAPPING_TO_METHOD` at the top of the file:
 

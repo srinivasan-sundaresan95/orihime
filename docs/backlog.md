@@ -1,15 +1,15 @@
-# Indra — Post-v1.2 Backlog
+# Dedalus — Post-v1.2 Backlog
 
 ## What v1.2 Already Covers
 
-| Capability | SonarQube Coverage | Indra |
+| Capability | SonarQube Coverage | Dedalus |
 |---|---|---|
 | Cross-file taint (SAST) | Community ✓ | S4 ✓ |
 | Custom sources/sinks YAML | Enterprise | S5 ✓ |
 | Second-order injection | Neither | S6 ✓ |
 | OWASP/CWE/PCI/STIG reports | Enterprise | S7 ✓ |
 
-Indra closes ~70% of Aikido's advantage over SonarQube Community within a static graph.
+Dedalus closes ~70% of Aikido's advantage over SonarQube Community within a static graph.
 
 ---
 
@@ -66,7 +66,7 @@ Patterns detected:
 - Flag endpoints within 20% of their estimated saturation RPS
 
 *Live Prometheus/Mon-aaS data:*
-- Same analysis but continuously updated. Indra already has Mon-aaS MCP available
+- Same analysis but continuously updated. Dedalus already has Mon-aaS MCP available
 - Drift detection: p99 growing week-over-week on a method with `O(n²)` hint = leading indicator of data-growth regression before it becomes an incident
 
 *Cross-service cascade risk:*
@@ -85,7 +85,7 @@ OBSERVED_AT:      Method → PerfSample
 - `estimate_capacity(repo_name)` — Little's Law per endpoint, flags near-saturation
 - `find_cascade_risk(repo_name)` — downstream saturation limits on upstream endpoints
 
-*Note: No tool today does this. SonarQube, Datadog, Grafana, Gatling each see only their slice. Indra is the join layer.*
+*Note: No tool today does this. SonarQube, Datadog, Grafana, Gatling each see only their slice. Dedalus is the join layer.*
 
 ---
 
@@ -105,7 +105,7 @@ Add a dedicated tab in the web UI showing findings from S4–S8 and G7–G8 in a
 
 **Fix C — Write-serialization server (~20h, for bare metal multi-repo)**: A thin FastAPI process that owns the KuzuDB connection singleton, serializes all writes via an asyncio queue, and exposes the same HTTP endpoints the UI and MCP server already use. Developers running locally open KuzuDB directly as today — they are completely unaware of this layer. The server deployment runs via the FastAPI process instead. KuzuDB stays embedded; no new database engine.
 
-No alternative database engine is worth considering. FalkorDB (Redis module) and Apache AGE (PostgreSQL extension) both require a separate server daemon — developers would need to run Redis or PostgreSQL before Indra works. KuzuDB's embedded model is the reason the developer experience is frictionless and must be preserved.
+No alternative database engine is worth considering. FalkorDB (Redis module) and Apache AGE (PostgreSQL extension) both require a separate server daemon — developers would need to run Redis or PostgreSQL before Dedalus works. KuzuDB's embedded model is the reason the developer experience is frictionless and must be preserved.
 
 ---
 
@@ -145,15 +145,15 @@ MCP tool: `find_license_violations(repo_name, allowed=["MIT","Apache-2.0","BSD-2
 ---
 
 
-## Not Worth Building in Indra
+## Not Worth Building in Dedalus
 
 | Capability | Reason |
 |---|---|
-| FalkorDB / Apache AGE / any server DB | All require a separate daemon process (Redis or PostgreSQL); developers would need to run infrastructure before Indra works. KuzuDB's embedded model is non-negotiable for frictionless local use. G5 Fix C solves the multi-user server case without leaving KuzuDB. |
+| FalkorDB / Apache AGE / any server DB | All require a separate daemon process (Redis or PostgreSQL); developers would need to run infrastructure before Dedalus works. KuzuDB's embedded model is non-negotiable for frictionless local use. G5 Fix C solves the multi-user server case without leaving KuzuDB. |
 | Hardcoded secrets detection (S9) | Detekt secrets plugin + SonarQube Community S6437 + GitHub push protection already cover this |
-| Dependency CVE standalone (S10) | Dependabot, SonarQube Community SCA, Snyk all do this; Indra's angle (reachability-aware CVE) is a follow-on to S8 + G9, not a standalone project |
-| IDE LSP integration (S12) | SonarLint + Detekt IntelliJ plugin already provide inline warnings; a fourth source causes alert fatigue; CI/CD is the better Indra integration point |
-| Watch mode (G6) | A Git post-commit hook calling `python -m indra index` is a one-liner; v1.1-A blob hash skipping makes it fast enough |
+| Dependency CVE standalone (S10) | Dependabot, SonarQube Community SCA, Snyk all do this; Dedalus's angle (reachability-aware CVE) is a follow-on to S8 + G9, not a standalone project |
+| IDE LSP integration (S12) | SonarLint + Detekt IntelliJ plugin already provide inline warnings; a fourth source causes alert fatigue; CI/CD is the better Dedalus integration point |
+| Watch mode (G6) | A Git post-commit hook calling `python -m dedalus index` is a one-liner; v1.1-A blob hash skipping makes it fast enough |
 | Auto-patch generation | Requires LLM + CI/CD pipeline; separate agent workflow |
 | Runtime vulnerability validation | Requires live app + network; fundamentally dynamic |
 | Malware in dependencies | Requires behavioral sandboxing |

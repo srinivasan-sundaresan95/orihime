@@ -1,4 +1,4 @@
-"""Unit tests for indra.cross_resolver.
+"""Unit tests for dedalus.cross_resolver.
 
 All tests use a fresh in-memory KuzuDB instance (temp dir) with hand-inserted
 nodes — no real repo checkout required.
@@ -11,8 +11,8 @@ import tempfile
 import kuzu
 import pytest
 
-from indra.schema import init_schema
-from indra.cross_resolver import load_indexed_repos, run_cross_resolution
+from dedalus.schema import init_schema
+from dedalus.cross_resolver import load_indexed_repos, run_cross_resolution
 
 
 # ---------------------------------------------------------------------------

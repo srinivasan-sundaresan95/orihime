@@ -1,13 +1,13 @@
-"""Unit tests for indra.java_extractor — JavaExtractor on Sample.java."""
+"""Unit tests for dedalus.java_extractor — JavaExtractor on Sample.java."""
 from __future__ import annotations
 
 import pathlib
 
 import pytest
 
-import indra.java_extractor  # noqa: F401 — triggers register()
-from indra.java_extractor import JavaExtractor
-from indra.language import get_parser
+import dedalus.java_extractor  # noqa: F401 — triggers register()
+from dedalus.java_extractor import JavaExtractor
+from dedalus.language import get_parser
 
 FIXTURE = pathlib.Path(__file__).parent.parent / "fixtures" / "Sample.java"
 

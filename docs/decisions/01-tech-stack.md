@@ -2,7 +2,7 @@
 
 ## Python
 
-Python is the implementation language for Indra. The choice is driven by the ecosystem:
+Python is the implementation language for Dedalus. The choice is driven by the ecosystem:
 
 - **tree-sitter** has first-class Python bindings (`pip install tree-sitter`) — the most mature non-JS binding available
 - **KuzuDB** provides official Python bindings — the only embedded graph DB that does
@@ -38,7 +38,7 @@ KuzuDB is an embedded property graph database with Cypher query support. Chosen 
 - **TigerGraph / Memgraph** — server-only, no embedded mode for local dev
 
 KuzuDB provides:
-- Embedded mode (single file, `~/.indra/indra.db`) — always available, no server needed for local dev
+- Embedded mode (single file, `~/.dedalus/dedalus.db`) — always available, no server needed for local dev
 - Server mode — deploy on BMaaS for team-shared access
 - Kuzu Explorer — built-in web UI, no custom frontend needed
 - Cypher path queries — `MATCH p=(a)-[:CALLS*1..5]->(b)` works natively
@@ -55,7 +55,7 @@ The Model Context Protocol SDK provides the server scaffolding for Claude Code i
 
 | Mode | Config | Use case |
 |------|--------|----------|
-| Local embedded | `KUZU_LOCAL_PATH=~/.indra/indra.db` | Developer workstation, always available |
+| Local embedded | `KUZU_LOCAL_PATH=~/.dedalus/dedalus.db` | Developer workstation, always available |
 | Team server | `KUZU_SERVER_URL=http://bmaas:8000` | Shared read access; CI writes only |
 | Both simultaneously | Both env vars set | MCP server holds two named connections |
 

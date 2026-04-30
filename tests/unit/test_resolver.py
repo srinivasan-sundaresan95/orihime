@@ -1,13 +1,13 @@
-"""Unit tests for indra.resolver — local symbol resolver."""
+"""Unit tests for dedalus.resolver — local symbol resolver."""
 from __future__ import annotations
 
 import dataclasses
 import pathlib
 import uuid
 
-import indra.java_extractor  # noqa: F401 — triggers register()
-from indra.language import get_parser
-from indra.resolver import CallEdge, build_fqn_index, resolve_calls
+import dedalus.java_extractor  # noqa: F401 — triggers register()
+from dedalus.language import get_parser
+from dedalus.resolver import CallEdge, build_fqn_index, resolve_calls
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 CALL_CHAIN_JAVA = FIXTURES / "CallChain.java"

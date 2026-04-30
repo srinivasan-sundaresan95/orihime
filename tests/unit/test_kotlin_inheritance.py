@@ -13,8 +13,8 @@ import pathlib
 
 import pytest
 
-from indra.kotlin_extractor import KotlinExtractor, _extract_kotlin_supertypes
-from indra.language import get_parser
+from dedalus.kotlin_extractor import KotlinExtractor, _extract_kotlin_supertypes
+from dedalus.language import get_parser
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 

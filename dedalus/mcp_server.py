@@ -1,4 +1,4 @@
-"""Indra MCP Server — code knowledge graph query tools.
+"""Dedalus MCP Server — code knowledge graph query tools.
 
 Exposes 11 tools over the MCP protocol (FastMCP):
   10 query tools + 1 index_repo_tool.
@@ -6,11 +6,11 @@ Exposes 11 tools over the MCP protocol (FastMCP):
 Connection modes
 ----------------
 Phase 1 (local):
-    Set INDRA_DB_PATH to point at a KuzuDB directory (default: ~/.indra/indra.db).
+    Set DEDALUS_DB_PATH to point at a KuzuDB directory (default: ~/.dedalus/dedalus.db).
     The database is opened lazily on the first tool call and reused.
 
 Phase 2 (team/server, future):
-    Set INDRA_SERVER_URL to the KuzuDB HTTP endpoint.
+    Set DEDALUS_SERVER_URL to the KuzuDB HTTP endpoint.
     The local file will be ignored when this variable is set.
     Implementation is deferred; the env-var is documented here for forward-compat.
 """
@@ -29,19 +29,19 @@ from mcp.server.fastmcp import FastMCP
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s [indra] %(message)s")
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s [dedalus] %(message)s")
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-_DEFAULT_DB_PATH = str(Path.home() / ".indra" / "indra.db")
+_DEFAULT_DB_PATH = str(Path.home() / ".dedalus" / "dedalus.db")
 
-# INDRA_SERVER_URL — reserved for Phase 2 (remote KuzuDB HTTP endpoint).
+# DEDALUS_SERVER_URL — reserved for Phase 2 (remote KuzuDB HTTP endpoint).
 # Not used in Phase 1; present only for forward-compatibility.
-_SERVER_URL: str = os.environ.get("INDRA_SERVER_URL", "")
+_SERVER_URL: str = os.environ.get("DEDALUS_SERVER_URL", "")
 
-_DB_PATH: str = os.environ.get("INDRA_DB_PATH", _DEFAULT_DB_PATH)
+_DB_PATH: str = os.environ.get("DEDALUS_DB_PATH", _DEFAULT_DB_PATH)
 
 # ---------------------------------------------------------------------------
 # Lazy connection singleton
@@ -104,9 +104,9 @@ def _rows(result: kuzu.QueryResult, columns: list[str]) -> list[dict]:
 # FastMCP instance
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
-    name="indra",
+    name="dedalus",
     instructions=(
-        "Indra is a code knowledge graph for Java/Kotlin Spring Boot repositories. "
+        "Dedalus is a code knowledge graph for Java/Kotlin Spring Boot repositories. "
         "Use these tools to answer questions about method call chains, REST endpoints, "
         "blast radius of changes, and cross-repo dependencies."
     ),
@@ -497,7 +497,7 @@ def list_endpoints(repo_name: str = "") -> list[dict]:
 def list_unresolved_calls(repo_name: str = "") -> list[dict]:
     """List outgoing REST calls that could not be matched to a known endpoint.
 
-    These represent cross-repo or external HTTP calls that Indra has not yet
+    These represent cross-repo or external HTTP calls that Dedalus has not yet
     resolved to an Endpoint node.
 
     Args:
@@ -759,7 +759,7 @@ def find_eager_fetches(repo_name: str) -> list[dict]:
 def find_cross_service_taint(repo_name: str, max_depth: int = 6) -> list[dict]:
     """Find taint paths from HTTP endpoint handler parameters to outgoing REST calls.
 
-    This is an Indra-native equivalent of SonarQube Enterprise "Advanced SAST"
+    This is an Dedalus-native equivalent of SonarQube Enterprise "Advanced SAST"
     cross-service taint analysis.
 
     A taint path is a call chain that starts at an HTTP endpoint handler method
@@ -907,7 +907,7 @@ def find_taint_sinks(repo_name: str) -> list[dict]:
     """Find all calls to known dangerous sink methods in the given repository.
 
     Uses the built-in sink registry (SQL, HTTP clients, exec) merged with any
-    custom sinks defined in ``~/.indra/security.yml``.  This is the custom
+    custom sinks defined in ``~/.dedalus/security.yml``.  This is the custom
     sources/sinks equivalent of SonarQube Enterprise's configurable taint rules.
 
     Args:
@@ -917,7 +917,7 @@ def find_taint_sinks(repo_name: str) -> list[dict]:
         List of dicts with keys:
             ``caller_fqn``, ``sink_method``, ``file_path``, ``line_start``.
     """
-    from indra.security_config import get_security_config  # noqa: PLC0415
+    from dedalus.security_config import get_security_config  # noqa: PLC0415
     conn = _get_connection()
     if conn is None:
         return []
@@ -982,13 +982,13 @@ def list_security_config() -> dict:
     """Return the active security configuration (sources, sinks, sanitizers).
 
     Shows the merged built-in + user-defined rules currently in effect.
-    Useful for verifying that custom ``~/.indra/security.yml`` rules were loaded.
+    Useful for verifying that custom ``~/.dedalus/security.yml`` rules were loaded.
 
     Returns:
         Dict with keys ``source_annotations``, ``source_methods``,
         ``sink_methods``, ``sanitizer_methods``.
     """
-    from indra.security_config import get_security_config  # noqa: PLC0415
+    from dedalus.security_config import get_security_config  # noqa: PLC0415
     cfg = get_security_config()
     return {
         "source_annotations": cfg.source_annotations,
@@ -1010,7 +1010,7 @@ def find_second_order_injection(repo_name: str) -> list[dict]:
       1. User-controlled data reaches a persistence write (JPA save/persist/merge).
       2. That same data is later read back from the DB and passed to a dangerous sink.
 
-    Indra approximates this by finding:
+    Dedalus approximates this by finding:
       - Methods that write to a JPA entity (call to save/persist/merge on a Repository
         class or on an EntityManager).
       - Methods that read from the same entity type (findById/findAll/executeQuery) AND
@@ -1185,7 +1185,7 @@ _STIG_MAPPINGS: dict[str, str] = {
 def generate_security_report(repo_name: str, framework: str = "owasp") -> list[dict]:
     """Generate a security findings report mapped to a compliance framework.
 
-    This is the Indra equivalent of SonarQube Enterprise's OWASP / CWE /
+    This is the Dedalus equivalent of SonarQube Enterprise's OWASP / CWE /
     PCI DSS / STIG security reports.  It aggregates findings from the taint
     analysis and maps each to the requested framework's taxonomy.
 
@@ -1272,7 +1272,7 @@ def index_repo_tool(
     branch: str = "master",
     force: bool = False,
 ) -> dict:
-    """Index a source repository into the Indra knowledge graph.
+    """Index a source repository into the Dedalus knowledge graph.
 
     After indexing, all other query tools will reflect the new data.
 
@@ -1291,7 +1291,7 @@ def index_repo_tool(
         On failure, returns ``{"error": "<message>"}``.
     """
     try:
-        from indra.indexer import index_repo  # noqa: PLC0415
+        from dedalus.indexer import index_repo  # noqa: PLC0415
     except ImportError as exc:
         return {"error": f"indexer not available: {exc}"}
 
@@ -1310,11 +1310,11 @@ def index_repo_tool(
 # ---------------------------------------------------------------------------
 
 def cli() -> None:
-    """Entry point called from ``python -m indra serve``.
+    """Entry point called from ``python -m dedalus serve``.
 
     Starts the MCP server using stdio transport (default for Claude Code).
     """
-    log.info("Starting Indra MCP server (db=%s)", _DB_PATH)
+    log.info("Starting Dedalus MCP server (db=%s)", _DB_PATH)
     mcp.run()
 
 

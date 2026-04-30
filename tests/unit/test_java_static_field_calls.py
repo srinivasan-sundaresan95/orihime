@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import pathlib
 
-import indra.java_extractor  # noqa: F401 — triggers register()
-from indra.java_extractor import JavaExtractor
-from indra.language import get_parser
-from indra.resolver import build_fqn_index, resolve_calls
+import dedalus.java_extractor  # noqa: F401 — triggers register()
+from dedalus.java_extractor import JavaExtractor
+from dedalus.language import get_parser
+from dedalus.resolver import build_fqn_index, resolve_calls
 
 FIXTURE = pathlib.Path(__file__).parent.parent / "fixtures" / "StaticFieldCalls.java"
 

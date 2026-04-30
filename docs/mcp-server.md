@@ -1,6 +1,6 @@
-# Indra MCP Server
+# Dedalus MCP Server
 
-Indra exposes its code knowledge graph as an [MCP](https://modelcontextprotocol.io) server so that AI assistants (Claude Code, Claude Desktop) can query it via natural language.
+Dedalus exposes its code knowledge graph as an [MCP](https://modelcontextprotocol.io) server so that AI assistants (Claude Code, Claude Desktop) can query it via natural language.
 
 ## Quick start
 
@@ -8,10 +8,10 @@ Index a repo first, then start the server:
 
 ```bash
 # Index one or more repos
-python -m indra index --repo /path/to/my-repo --name my-repo
+python -m dedalus index --repo /path/to/my-repo --name my-repo
 
 # Start the MCP server (stdio transport)
-python -m indra serve
+python -m dedalus serve
 ```
 
 ## Claude Code registration
@@ -21,27 +21,27 @@ Add the following to `~/.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "indra": {
+    "dedalus": {
       "type": "stdio",
-      "command": "/path/to/indra/.venv/bin/python",
-      "args": ["-m", "indra", "serve"],
-      "cwd": "/path/to/indra",
+      "command": "/path/to/dedalus/.venv/bin/python",
+      "args": ["-m", "dedalus", "serve"],
+      "cwd": "/path/to/dedalus",
       "env": {
-        "INDRA_DB_PATH": "/home/youruser/.indra/indra.db"
+        "DEDALUS_DB_PATH": "/home/youruser/.dedalus/dedalus.db"
       }
     }
   }
 }
 ```
 
-After adding this entry, restart Claude Code. The `indra` MCP server will appear in the tool list.
+After adding this entry, restart Claude Code. The `dedalus` MCP server will appear in the tool list.
 
 ## Configuration
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `INDRA_DB_PATH` | `~/.indra/indra.db` | Path to the KuzuDB database |
-| `INDRA_SERVER_URL` | *(unset)* | Reserved for Phase 2 (remote KuzuDB HTTP endpoint) |
+| `DEDALUS_DB_PATH` | `~/.dedalus/dedalus.db` | Path to the KuzuDB database |
+| `DEDALUS_SERVER_URL` | *(unset)* | Reserved for Phase 2 (remote KuzuDB HTTP endpoint) |
 
 ## Available tools
 
@@ -109,11 +109,11 @@ index_repo_tool("/home/srini/repos/my-service", "my-service")
 
 The server opens the KuzuDB lazily on the first tool call and reuses the connection for the lifetime of the process. After `index_repo_tool` completes, the connection is reset so subsequent queries see the freshly-indexed data.
 
-If `INDRA_DB_PATH` doesn't exist yet (no repo indexed), all query tools return empty results gracefully instead of raising an error.
+If `DEDALUS_DB_PATH` doesn't exist yet (no repo indexed), all query tools return empty results gracefully instead of raising an error.
 
 ## Phase 2: Team / server mode
 
-Set `INDRA_SERVER_URL` to a remote KuzuDB HTTP endpoint to share a single indexed graph across a team. The local file is ignored when this variable is set. Implementation is deferred to Phase 2.
+Set `DEDALUS_SERVER_URL` to a remote KuzuDB HTTP endpoint to share a single indexed graph across a team. The local file is ignored when this variable is set. Implementation is deferred to Phase 2.
 
 ## Known limitations
 

@@ -18,8 +18,8 @@ import textwrap
 import kuzu
 import pytest
 
-from indra.indexer import index_repo
-from indra.cross_resolver import run_cross_resolution
+from dedalus.indexer import index_repo
+from dedalus.cross_resolver import run_cross_resolution
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def cross_e2e_fullurl():
     url_pattern is "http://wallet-svc/wallet/balance" must still match the
     Endpoint at "/wallet/balance" after the scheme+host prefix is stripped.
     """
-    from indra.indexer import index_repo
+    from dedalus.indexer import index_repo
 
     with tempfile.TemporaryDirectory() as repo_a_dir:
         with tempfile.TemporaryDirectory() as repo_b_dir:

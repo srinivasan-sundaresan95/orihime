@@ -1,4 +1,4 @@
-"""Integration tests for indexing point-bank-bff into Indra."""
+"""Integration tests for indexing point-bank-bff into Dedalus."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ import tempfile
 import kuzu
 import pytest
 
-from indra.indexer import index_repo
+from dedalus.indexer import index_repo
 
 BFF_REPO_PATH = "/mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bank-bff"
 BFF_REPO_NAME = "point-bank-bff"
@@ -36,7 +36,7 @@ def test_bff_method_count(bff_conn):
 def test_bff_endpoint_count(bff_conn):
     """BFF uses @BitcoinEndpoint (custom annotation, no standard path field).
 
-    Indra extracts 0 endpoints from point-bank-bff because its controller methods
+    Dedalus extracts 0 endpoints from point-bank-bff because its controller methods
     are annotated with a domain-specific @BitcoinEndpoint(api, version) rather than
     standard Spring @GetMapping/@PostMapping. This is expected behaviour — custom
     annotation support is Phase 2. The test documents the actual count.

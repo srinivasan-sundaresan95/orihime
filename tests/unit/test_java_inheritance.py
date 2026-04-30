@@ -17,8 +17,8 @@ import pathlib
 
 import pytest
 
-from indra.java_extractor import JavaExtractor, _build_import_map, _extract_inheritance
-from indra.language import get_parser
+from dedalus.java_extractor import JavaExtractor, _build_import_map, _extract_inheritance
+from dedalus.language import get_parser
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 

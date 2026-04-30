@@ -1,4 +1,4 @@
-"""Local symbol resolver for the Indra code knowledge graph.
+"""Local symbol resolver for the Dedalus code knowledge graph.
 
 Walks tree-sitter ASTs to resolve method call edges within a single file.
 This is a best-effort name-based resolver — it does not perform full type

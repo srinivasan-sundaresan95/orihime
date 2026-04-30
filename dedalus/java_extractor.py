@@ -1,4 +1,4 @@
-"""Java language extractor for the Indra code knowledge graph."""
+"""Java language extractor for the Dedalus code knowledge graph."""
 from __future__ import annotations
 
 import re

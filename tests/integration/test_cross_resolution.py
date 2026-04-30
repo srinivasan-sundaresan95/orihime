@@ -13,8 +13,8 @@ import tempfile
 import kuzu
 import pytest
 
-from indra.indexer import index_repo
-from indra.cross_resolver import run_cross_resolution
+from dedalus.indexer import index_repo
+from dedalus.cross_resolver import run_cross_resolution
 
 BFF_REPO_PATH = "/mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bank-bff"
 BFF_REPO_NAME = "point-bank-bff"

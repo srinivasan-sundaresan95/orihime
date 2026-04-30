@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import uuid
 
-import indra.java_extractor  # noqa: F401 — triggers register()
-from indra.language import get_parser
-from indra.resolver import CallEdge, build_fqn_index, resolve_calls
+import dedalus.java_extractor  # noqa: F401 — triggers register()
+from dedalus.language import get_parser
+from dedalus.resolver import CallEdge, build_fqn_index, resolve_calls
 
 
 # ---------------------------------------------------------------------------

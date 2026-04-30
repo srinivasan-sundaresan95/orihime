@@ -7,7 +7,7 @@ import tempfile
 import kuzu
 import pytest
 
-from indra.indexer import index_repo
+from dedalus.indexer import index_repo
 
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"
 

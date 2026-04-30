@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from indra.kotlin_extractor import KotlinExtractor
-from indra.language import get_parser
-from indra.resolver import build_fqn_index, resolve_calls
+from dedalus.kotlin_extractor import KotlinExtractor
+from dedalus.language import get_parser
+from dedalus.resolver import build_fqn_index, resolve_calls
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "ExtensionFunctions.kt"
 

@@ -1,4 +1,4 @@
-"""Unit tests for indra.walker.walk_repo.
+"""Unit tests for dedalus.walker.walk_repo.
 
 The language registry (_registry) starts empty — Java/Kotlin extractors
 are not auto-registered until a later task.  Every test that relies on
@@ -13,9 +13,9 @@ import pytest
 from pathlib import Path
 from typing import Iterator
 
-import indra.language as lang_module
-from indra.language import ExtractResult, register, registered_extensions
-from indra.walker import walk_repo
+import dedalus.language as lang_module
+from dedalus.language import ExtractResult, register, registered_extensions
+from dedalus.walker import walk_repo
 
 
 # ---------------------------------------------------------------------------

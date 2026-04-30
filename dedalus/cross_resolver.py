@@ -15,7 +15,7 @@ import sys
 
 import kuzu
 
-from indra.path_utils import compile_path_regex, match_url_pattern
+from dedalus.path_utils import compile_path_regex, match_url_pattern
 
 _SCHEME_HOST_RE = _re.compile(r'^https?://[^/]+')
 

@@ -1,18 +1,18 @@
-# python -m indra --repo /path --name my-repo [--db ~/.indra/indra.db]
-# python -m indra serve
-# python -m indra ui [--port 7700] [--db ~/.indra/indra.db]
-# python -m indra resolve [--db ~/.indra/indra.db]
+# python -m dedalus --repo /path --name my-repo [--db ~/.dedalus/dedalus.db]
+# python -m dedalus serve
+# python -m dedalus ui [--port 7700] [--db ~/.dedalus/dedalus.db]
+# python -m dedalus resolve [--db ~/.dedalus/dedalus.db]
 import argparse
 import sys
 from pathlib import Path
 
-from indra.indexer import index_repo
+from dedalus.indexer import index_repo
 
-_DEFAULT_DB_PATH = str(Path.home() / ".indra" / "indra.db")
+_DEFAULT_DB_PATH = str(Path.home() / ".dedalus" / "dedalus.db")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Indra code graph indexer / MCP server")
+    parser = argparse.ArgumentParser(description="Dedalus code graph indexer / MCP server")
     subparsers = parser.add_subparsers(dest="command")
 
     # ---- index (default when no subcommand given for backwards compat) ----
@@ -22,7 +22,7 @@ def main() -> None:
     index_parser.add_argument(
         "--db",
         default=_DEFAULT_DB_PATH,
-        help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
+        help="Path to the KuzuDB database file (default: ~/.dedalus/dedalus.db)",
     )
     index_parser.add_argument(
         "--force",
@@ -37,10 +37,10 @@ def main() -> None:
     )
 
     # ---- serve ----
-    subparsers.add_parser("serve", help="Start the Indra MCP server (stdio transport)")
+    subparsers.add_parser("serve", help="Start the Dedalus MCP server (stdio transport)")
 
     # ---- ui ----
-    ui_parser = subparsers.add_parser("ui", help="Start the Indra web UI (browser)")
+    ui_parser = subparsers.add_parser("ui", help="Start the Dedalus web UI (browser)")
     ui_parser.add_argument(
         "--port",
         type=int,
@@ -50,7 +50,7 @@ def main() -> None:
     ui_parser.add_argument(
         "--db",
         default=None,
-        help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
+        help="Path to the KuzuDB database file (default: ~/.dedalus/dedalus.db)",
     )
 
     # ---- resolve ----
@@ -61,27 +61,27 @@ def main() -> None:
     resolve_parser.add_argument(
         "--db",
         default=_DEFAULT_DB_PATH,
-        help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
+        help="Path to the KuzuDB database file (default: ~/.dedalus/dedalus.db)",
     )
 
-    # ---- legacy flat args: python -m indra --repo ... --name ... ----
+    # ---- legacy flat args: python -m dedalus --repo ... --name ... ----
     # Keep backwards compatibility: if the first arg starts with '--', treat
     # the whole invocation as an implicit 'index' command.
     args, remaining = parser.parse_known_args()
 
     if args.command == "serve":
-        from indra.mcp_server import cli
+        from dedalus.mcp_server import cli
         cli()
         return
 
     if args.command == "ui":
-        from indra.ui_server import run_ui
+        from dedalus.ui_server import run_ui
         run_ui(port=args.port, db_path=args.db or _DEFAULT_DB_PATH)
         return
 
     if args.command == "resolve":
         import kuzu
-        from indra.cross_resolver import run_cross_resolution, load_indexed_repos
+        from dedalus.cross_resolver import run_cross_resolution, load_indexed_repos
         db = kuzu.Database(str(args.db))
         conn = kuzu.Connection(db)
         repos = load_indexed_repos(conn)
@@ -102,13 +102,13 @@ def main() -> None:
         return
 
     # Legacy mode: re-parse with flat args
-    legacy_parser = argparse.ArgumentParser(description="Indra code graph indexer")
+    legacy_parser = argparse.ArgumentParser(description="Dedalus code graph indexer")
     legacy_parser.add_argument("--repo", required=True, help="Path to the repository root")
     legacy_parser.add_argument("--name", required=True, help="Logical name for the repository")
     legacy_parser.add_argument(
         "--db",
-        default=str(Path.home() / ".indra" / "indra.db"),
-        help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
+        default=str(Path.home() / ".dedalus" / "dedalus.db"),
+        help="Path to the KuzuDB database file (default: ~/.dedalus/dedalus.db)",
     )
     legacy_args = legacy_parser.parse_args()
     summary = index_repo(legacy_args.repo, legacy_args.name, legacy_args.db)

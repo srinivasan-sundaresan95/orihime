@@ -1,7 +1,7 @@
-"""Indra Web UI — served by Starlette + uvicorn.
+"""Dedalus Web UI — served by Starlette + uvicorn.
 
 Start with:
-    python -m indra ui [--port 7700] [--db ~/.indra/indra.db]
+    python -m dedalus ui [--port 7700] [--db ~/.dedalus/dedalus.db]
 
 Pages
 -----
@@ -255,7 +255,7 @@ tr:hover td { background: #1e2130; }
 def _html_page(title: str, body: str) -> str:
     nav = """
 <nav>
-  <span class="brand">&#9672; Indra</span>
+  <span class="brand">&#9672; Dedalus</span>
   <a href="/">Search</a>
   <a href="/graph">Graph</a>
   <a href="/endpoints">Endpoints</a>
@@ -266,7 +266,7 @@ def _html_page(title: str, body: str) -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{_esc(title)} — Indra</title>
+<title>{_esc(title)} — Dedalus</title>
 <style>{_CSS}</style>
 </head>
 <body>
@@ -677,7 +677,7 @@ class _DB:
 
     def index_repo(self, repo_path: str, repo_name: str, db_path: str) -> dict:
         try:
-            from indra.indexer import index_repo  # noqa: PLC0415
+            from dedalus.indexer import index_repo  # noqa: PLC0415
             summary = index_repo(repo_path, repo_name, db_path)
             # Reopen connection to pick up fresh data
             import kuzu  # noqa: PLC0415
@@ -1411,9 +1411,9 @@ def _make_app(db: _DB, db_path: str):
 # ---------------------------------------------------------------------------
 
 def run_ui(port: int = 7700, db_path: str = "") -> None:
-    """Start the Indra web UI on *port*, opening a browser automatically."""
+    """Start the Dedalus web UI on *port*, opening a browser automatically."""
     if not db_path:
-        db_path = os.environ.get("INDRA_DB_PATH", str(Path.home() / ".indra" / "indra.db"))
+        db_path = os.environ.get("DEDALUS_DB_PATH", str(Path.home() / ".dedalus" / "dedalus.db"))
 
     import uvicorn  # noqa: PLC0415
 
@@ -1421,8 +1421,8 @@ def run_ui(port: int = 7700, db_path: str = "") -> None:
     app = _make_app(db, db_path)
 
     url = f"http://localhost:{port}"
-    log.info("Starting Indra UI at %s (db=%s)", url, db_path)
-    print(f"\n  Indra UI  →  {url}\n  Press Ctrl+C to stop.\n")
+    log.info("Starting Dedalus UI at %s (db=%s)", url, db_path)
+    print(f"\n  Dedalus UI  →  {url}\n  Press Ctrl+C to stop.\n")
 
     # Open browser after a short delay to allow the server to start
     Timer(1.0, lambda: webbrowser.open(url)).start()

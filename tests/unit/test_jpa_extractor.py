@@ -14,13 +14,13 @@ import pathlib
 import pytest
 
 # Trigger extractor registration
-import indra.java_extractor  # noqa: F401
+import dedalus.java_extractor  # noqa: F401
 
-from indra.java_extractor import JavaExtractor, _build_import_map
-from indra.language import get_parser
+from dedalus.java_extractor import JavaExtractor, _build_import_map
+from dedalus.language import get_parser
 
 try:
-    from indra.java_extractor import _extract_entity_relations
+    from dedalus.java_extractor import _extract_entity_relations
     _HAS_EXTRACT_ENTITY_RELATIONS = True
 except ImportError:
     _HAS_EXTRACT_ENTITY_RELATIONS = False
