@@ -45,6 +45,42 @@ from dedalus.parse_result import ParseResult
 from dedalus.resolver import build_fqn_index, resolve_calls
 from dedalus.schema import init_schema
 from dedalus.walker import walk_repo
+from dedalus.write_client import WriteClient
+
+
+# ---------------------------------------------------------------------------
+# _Writer: routes write statements to local KuzuDB or the remote write server
+# ---------------------------------------------------------------------------
+
+class _Writer:
+    """Routes write statements to either a local KuzuDB connection or the
+    remote write-serialization server, depending on whether DEDALUS_SERVER_URL
+    is set.
+
+    In local mode (server_url is empty) every statement is executed directly
+    on *conn*.  In server mode every statement is forwarded to the FastAPI
+    write server via HTTP, which serialises concurrent writes and avoids
+    KuzuDB's single-writer lock error.
+    """
+
+    def __init__(self, conn: kuzu.Connection, server_url: str = "") -> None:
+        self._conn = conn
+        self._client: WriteClient | None = WriteClient(server_url) if server_url else None
+
+    def execute(self, cypher: str, params: dict | None = None) -> None:
+        """Execute a single write statement."""
+        if self._client:
+            self._client.execute(cypher, params or {})
+        else:
+            self._conn.execute(cypher, params or {})
+
+    def execute_batch(self, statements: list[dict]) -> None:
+        """Execute multiple write statements (no transactional grouping in local mode)."""
+        if self._client:
+            self._client.execute_batch(statements)
+        else:
+            for s in statements:
+                self._conn.execute(s["cypher"], s.get("params", {}))
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +236,21 @@ def _load_stored_hashes(conn: kuzu.Connection, repo_id: str) -> dict[str, str]:
     return stored
 
 
-def _delete_file_data(conn: kuzu.Connection, file_path_str: str, repo_id: str) -> None:
-    """Delete all graph data for a single file (used during incremental re-index)."""
+def _delete_file_data(
+    conn: kuzu.Connection,
+    file_path_str: str,
+    repo_id: str,
+    writer: "_Writer | None" = None,
+) -> None:
+    """Delete all graph data for a single file (used during incremental re-index).
+
+    *conn* is used for the read queries (MATCH ... RETURN) that gather IDs.
+    *writer* (if provided) is used for all DELETE statements so that in server
+    mode writes are forwarded to the write-serialization server.  When *writer*
+    is None the DELETE statements fall back to *conn* directly (local mode).
+    """
+    _w: _Writer = writer if writer is not None else _Writer(conn)
+
     r = conn.execute(
         "MATCH (f:File) WHERE f.path = $path AND f.repo_id = $rid RETURN f.id",
         {"path": file_path_str, "rid": repo_id},
@@ -223,42 +272,42 @@ def _delete_file_data(conn: kuzu.Connection, file_path_str: str, repo_id: str) -
         class_ids.append(r3.get_next()[0])
 
     # Edges on methods — KuzuDB requires each param dict to contain ONLY used params
-    conn.execute("MATCH (m:Method)-[e:CALLS]->(:Method) WHERE m.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (:Method)-[e:CALLS]->(m:Method) WHERE m.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (m:Method)-[e:CALLS_REST]->(:Endpoint) WHERE m.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (m:Method)-[e:UNRESOLVED_CALL]->(:RestCall) WHERE m.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (:Class)-[e:CONTAINS_METHOD]->(m:Method) WHERE m.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (m:Method)-[e:CALLS]->(:Method) WHERE m.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (:Method)-[e:CALLS]->(m:Method) WHERE m.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (m:Method)-[e:CALLS_REST]->(:Endpoint) WHERE m.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (m:Method)-[e:UNRESOLVED_CALL]->(:RestCall) WHERE m.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (:Class)-[e:CONTAINS_METHOD]->(m:Method) WHERE m.file_id = $fid DELETE e", p)
     # Inheritance and entity-relation edges on classes in this file
-    conn.execute("MATCH (c:Class)-[e:EXTENDS]->(:Class) WHERE c.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (:Class)-[e:EXTENDS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (c:Class)-[e:IMPLEMENTS]->(:Class) WHERE c.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (:Class)-[e:IMPLEMENTS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (c:Class)-[e:HAS_RELATION]->(:EntityRelation) WHERE c.file_id = $fid DELETE e", p)
-    conn.execute("MATCH (c:Class)-[e:CONTAINS_CLASS]->() WHERE c.file_id = $fid DELETE e", p)
-    conn.execute("MATCH ()-[e:CONTAINS_CLASS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (c:Class)-[e:EXTENDS]->(:Class) WHERE c.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (:Class)-[e:EXTENDS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (c:Class)-[e:IMPLEMENTS]->(:Class) WHERE c.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (:Class)-[e:IMPLEMENTS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (c:Class)-[e:HAS_RELATION]->(:EntityRelation) WHERE c.file_id = $fid DELETE e", p)
+    _w.execute("MATCH (c:Class)-[e:CONTAINS_CLASS]->() WHERE c.file_id = $fid DELETE e", p)
+    _w.execute("MATCH ()-[e:CONTAINS_CLASS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
     # Node cleanup — orphaned RestCalls/EntityRelations referencing this file's methods/classes
     for mid in method_ids:
-        conn.execute(
+        _w.execute(
             "MATCH (n:RestCall) WHERE n.caller_method_id = $mid DELETE n",
             {"mid": mid},
         )
         # Remove EXPOSES edges before deleting Endpoint nodes (KuzuDB requires edge-first delete)
-        conn.execute(
+        _w.execute(
             "MATCH (:Repo)-[e:EXPOSES]->(ep:Endpoint) WHERE ep.handler_method_id = $mid DELETE e",
             {"mid": mid},
         )
-        conn.execute(
+        _w.execute(
             "MATCH (n:Endpoint) WHERE n.handler_method_id = $mid DELETE n",
             {"mid": mid},
         )
     for cid in class_ids:
-        conn.execute(
+        _w.execute(
             "MATCH (n:EntityRelation) WHERE n.source_class_id = $cid DELETE n",
             {"cid": cid},
         )
-    conn.execute("MATCH (m:Method) WHERE m.file_id = $fid DELETE m", p)
-    conn.execute("MATCH (n:Class) WHERE n.file_id = $fid DELETE n", p)
-    conn.execute("MATCH (f:File) WHERE f.id = $fid DELETE f", p)
+    _w.execute("MATCH (m:Method) WHERE m.file_id = $fid DELETE m", p)
+    _w.execute("MATCH (n:Class) WHERE n.file_id = $fid DELETE n", p)
+    _w.execute("MATCH (f:File) WHERE f.id = $fid DELETE f", p)
 
 
 def _has_tables(conn: kuzu.Connection) -> bool:
@@ -267,62 +316,71 @@ def _has_tables(conn: kuzu.Connection) -> bool:
     return result.has_next()
 
 
-def _delete_repo_data(conn: kuzu.Connection, repo_id: str) -> None:
-    """Delete all graph data for the given repo_id (idempotent)."""
+def _delete_repo_data(
+    conn: kuzu.Connection,
+    repo_id: str,
+    writer: "_Writer | None" = None,
+) -> None:
+    """Delete all graph data for the given repo_id (idempotent).
+
+    All statements here are writes (DELETE), so they are routed through
+    *writer* when provided.  Falls back to *conn* in local mode.
+    """
+    _w: _Writer = writer if writer is not None else _Writer(conn)
     rid = {"rid": repo_id}
 
     # --- relationship tables ---
     # Edges FROM Method
-    conn.execute(
+    _w.execute(
         "MATCH (a:Method)-[r:CALLS]->(b:Method) WHERE a.repo_id = $rid DELETE r", rid
     )
-    conn.execute(
+    _w.execute(
         "MATCH (a:Method)-[r:CALLS_REST]->(b:Endpoint) WHERE a.repo_id = $rid DELETE r", rid
     )
-    conn.execute(
+    _w.execute(
         "MATCH (a:Method)-[r:UNRESOLVED_CALL]->(b:RestCall) WHERE a.repo_id = $rid DELETE r", rid
     )
     # Edges FROM File and Class
-    conn.execute(
+    _w.execute(
         "MATCH (f:File)-[r:CONTAINS_CLASS]->(c:Class) WHERE f.repo_id = $rid DELETE r", rid
     )
-    conn.execute(
+    _w.execute(
         "MATCH (c:Class)-[r:CONTAINS_METHOD]->(m:Method) WHERE c.repo_id = $rid DELETE r", rid
     )
     # Edges FROM Repo
-    conn.execute(
+    _w.execute(
         "MATCH (r:Repo)-[e:EXPOSES]->(ep:Endpoint) WHERE r.id = $rid DELETE e", rid
     )
     # Inheritance edges
-    conn.execute(
+    _w.execute(
         "MATCH (a:Class)-[r:EXTENDS]->(b:Class) WHERE a.repo_id = $rid DELETE r", rid
     )
-    conn.execute(
+    _w.execute(
         "MATCH (a:Class)-[r:IMPLEMENTS]->(b:Class) WHERE a.repo_id = $rid DELETE r", rid
     )
 
     # Entity relation edges and nodes
-    conn.execute("MATCH (c:Class)-[r:HAS_RELATION]->(e:EntityRelation) WHERE c.repo_id = $rid DELETE r", rid)
-    conn.execute("MATCH (n:EntityRelation) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (c:Class)-[r:HAS_RELATION]->(e:EntityRelation) WHERE c.repo_id = $rid DELETE r", rid)
+    _w.execute("MATCH (n:EntityRelation) WHERE n.repo_id = $rid DELETE n", rid)
 
     # HAS_BRANCH edges and Branch nodes
-    conn.execute("MATCH (r:Repo)-[e:HAS_BRANCH]->(b:Branch) WHERE r.id = $rid DELETE e", rid)
-    conn.execute("MATCH (n:Branch) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (r:Repo)-[e:HAS_BRANCH]->(b:Branch) WHERE r.id = $rid DELETE e", rid)
+    _w.execute("MATCH (n:Branch) WHERE n.repo_id = $rid DELETE n", rid)
 
     # OBSERVED_AT edges and PerfSample/CapacityEstimate nodes
-    conn.execute(
+    _w.execute(
         "MATCH (m:Method)-[r:OBSERVED_AT]->(ps:PerfSample) WHERE m.repo_id = $rid DELETE r", rid
     )
-    conn.execute("MATCH (n:PerfSample) WHERE n.repo_id = $rid DELETE n", rid)
-    conn.execute("MATCH (n:CapacityEstimate) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:PerfSample) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:CapacityEstimate) WHERE n.repo_id = $rid DELETE n", rid)
 
     # --- node tables ---
-    conn.execute("MATCH (n:RestCall) WHERE n.repo_id = $rid DELETE n", rid)
-    conn.execute("MATCH (n:Endpoint) WHERE n.repo_id = $rid DELETE n", rid)
-    conn.execute("MATCH (n:Method) WHERE n.repo_id = $rid DELETE n", rid)
-    conn.execute("MATCH (n:Class) WHERE n.repo_id = $rid DELETE n", rid)
-    conn.execute("MATCH (n:File) WHERE n.repo_id = $rid DELETE n", rid)
-    conn.execute("MATCH (n:Repo) WHERE n.id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:RestCall) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:Endpoint) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:Method) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:Class) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:File) WHERE n.repo_id = $rid DELETE n", rid)
+    _w.execute("MATCH (n:Repo) WHERE n.id = $rid DELETE n", rid)
 
 
 # ---------------------------------------------------------------------------
@@ -374,15 +432,43 @@ def index_repo(
     repo_path = Path(repo_path)
     db_path = Path(db_path)
 
+    # Server mode: when DEDALUS_SERVER_URL is set, writes go through the
+    # write-serialization server instead of directly to KuzuDB.  Reads still
+    # use a local KuzuDB connection (read-only when the env var is set so that
+    # multiple readers can coexist with the server's writer connection).
+    _server_url = os.environ.get("DEDALUS_SERVER_URL", "")
+
     # Ensure the parent directory exists
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    db = kuzu.Database(str(db_path))
+    if _server_url:
+        # Read-only connection for this process; writes go to the server.
+        db = kuzu.Database(str(db_path), read_only=True)
+    else:
+        db = kuzu.Database(str(db_path))
     conn = kuzu.Connection(db)
+
+    # _Writer routes writes: local in default mode, HTTP in server mode.
+    writer = _Writer(conn, _server_url)
 
     # 1. Initialise schema if tables are absent
     if not _has_tables(conn):
-        init_schema(conn)
+        # Schema init is a sequence of DDL writes — route through writer.
+        from dedalus.schema import _NODE_TABLES, _REL_TABLES, _DROP_REL_TABLES, _DROP_NODE_TABLES
+        for table in _DROP_REL_TABLES:
+            try:
+                writer.execute(f"DROP TABLE {table}")
+            except Exception:
+                pass
+        for table in _DROP_NODE_TABLES:
+            try:
+                writer.execute(f"DROP TABLE {table}")
+            except Exception:
+                pass
+        for ddl in _NODE_TABLES:
+            writer.execute(ddl)
+        for ddl in _REL_TABLES:
+            writer.execute(ddl)
 
     # 2. Stable repo id and branch id
     repo_id = hashlib.md5(repo_name.encode()).hexdigest()
@@ -395,15 +481,15 @@ def index_repo(
     # 4. Full delete only on --force or first-time index; otherwise delete
     #    only changed/removed files below.
     if force or not stored_hashes:
-        _delete_repo_data(conn, repo_id)
-        conn.execute(
+        _delete_repo_data(conn, repo_id, writer=writer)
+        writer.execute(
             "CREATE (:Repo {id: $id, name: $name, root_path: $root_path})",
             {"id": repo_id, "name": repo_name, "root_path": str(repo_path)},
         )
     else:
         r = conn.execute("MATCH (r:Repo) WHERE r.id = $rid RETURN r.id", {"rid": repo_id})
         if not r.has_next():
-            conn.execute(
+            writer.execute(
                 "CREATE (:Repo {id: $id, name: $name, root_path: $root_path})",
                 {"id": repo_id, "name": repo_name, "root_path": str(repo_path)},
             )
@@ -411,11 +497,11 @@ def index_repo(
     # Upsert the Branch node and HAS_BRANCH edge (idempotent — skip if already exists)
     rb = conn.execute("MATCH (b:Branch) WHERE b.id = $bid RETURN b.id", {"bid": branch_id})
     if not rb.has_next():
-        conn.execute(
+        writer.execute(
             "CREATE (:Branch {id: $id, name: $name, repo_id: $repo_id})",
             {"id": branch_id, "name": branch, "repo_id": repo_id},
         )
-        conn.execute(
+        writer.execute(
             "MATCH (r:Repo), (b:Branch) WHERE r.id = $rid AND b.id = $bid CREATE (r)-[:HAS_BRANCH]->(b)",
             {"rid": repo_id, "bid": branch_id},
         )
@@ -452,13 +538,13 @@ def index_repo(
 
         # Changed or new: purge stale data for this file before re-inserting
         if file_path_str in stored_hashes:
-            _delete_file_data(conn, file_path_str, repo_id)
+            _delete_file_data(conn, file_path_str, repo_id, writer=writer)
 
         work_items_base.append((file_path_str, lang, file_id, repo_id, blob_hash, branch))
 
     # Delete files removed from the repo entirely
     for removed_path in set(stored_hashes) - current_paths:
-        _delete_file_data(conn, removed_path, repo_id)
+        _delete_file_data(conn, removed_path, repo_id, writer=writer)
 
     # Pre-pass: build cross-file constant index from all Java files (changed + unchanged).
     # We must pass unchanged files too so constants defined there remain resolvable.
@@ -583,20 +669,20 @@ def index_repo(
 
     # --- Flush File nodes (one transaction for entire table) ---
     if file_rows:
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for row in file_rows:
-            conn.execute(
+            writer.execute(
                 "CREATE (:File {id: $id, path: $path, language: $language, "
                 "repo_id: $repo_id, blob_hash: $blob_hash, branch_name: $branch_name})",
                 row,
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # --- Flush Class nodes ---
     if class_rows:
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for row in class_rows:
-            conn.execute(
+            writer.execute(
                 "CREATE (:Class {"
                 "id: $id, name: $name, fqn: $fqn, file_id: $file_id, "
                 "repo_id: $repo_id, is_interface: $is_interface, "
@@ -605,13 +691,13 @@ def index_repo(
                 "})",
                 row,
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # --- Flush Method nodes ---
     if method_rows:
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for row in method_rows:
-            conn.execute(
+            writer.execute(
                 "CREATE (:Method {"
                 "id: $id, name: $name, fqn: $fqn, class_id: $class_id, "
                 "file_id: $file_id, repo_id: $repo_id, line_start: $line_start, "
@@ -621,13 +707,13 @@ def index_repo(
                 "})",
                 row,
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # --- Flush Endpoint nodes ---
     if endpoint_rows:
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for row in endpoint_rows:
-            conn.execute(
+            writer.execute(
                 "CREATE (:Endpoint {"
                 "id: $id, http_method: $http_method, path: $path, "
                 "path_regex: $path_regex, handler_method_id: $handler_method_id, "
@@ -635,26 +721,26 @@ def index_repo(
                 "})",
                 row,
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # --- Flush RestCall nodes ---
     if rest_call_rows:
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for row in rest_call_rows:
-            conn.execute(
+            writer.execute(
                 "CREATE (:RestCall {"
                 "id: $id, http_method: $http_method, url_pattern: $url_pattern, "
                 "caller_method_id: $caller_method_id, repo_id: $repo_id"
                 "})",
                 row,
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # --- Flush EntityRelation nodes ---
     if entity_relation_rows:
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for row in entity_relation_rows:
-            conn.execute(
+            writer.execute(
                 "CREATE (:EntityRelation {"
                 "id: $id, source_class_id: $source_class_id, "
                 "target_class_fqn: $target_class_fqn, field_name: $field_name, "
@@ -663,7 +749,7 @@ def index_repo(
                 "})",
                 row,
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # FQN → class_id for inheritance edge resolution (built after all Class nodes written)
     fqn_to_class_id: dict[str, str] = {}
@@ -745,22 +831,22 @@ def index_repo(
         batch = calls_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for caller_id, callee_id, callee_name, caller_arg_pos, callee_param_pos in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (a:Method), (b:Method) "
                 "WHERE a.id = $caller AND b.id = $callee "
                 "CREATE (a)-[:CALLS {callee_name: $callee_name, caller_arg_pos: $caller_arg_pos, callee_param_pos: $callee_param_pos}]->(b)",
                 {"caller": caller_id, "callee": callee_id, "callee_name": callee_name,
                  "caller_arg_pos": caller_arg_pos, "callee_param_pos": callee_param_pos},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # Flush UNRESOLVED_CALL stub nodes (one transaction for all)
     if unresolved_nodes:
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for row in unresolved_nodes:
-            conn.execute(
+            writer.execute(
                 "CREATE (:RestCall {"
                 "id: $id, http_method: $http_method, url_pattern: $url_pattern, "
                 "callee_name: $callee_name, "
@@ -768,22 +854,22 @@ def index_repo(
                 "})",
                 row,
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # Flush UNRESOLVED_CALL edges in 500-edge transactions
     for _batch_start in range(0, max(1, len(unresolved_edges)), _EDGE_BATCH_SIZE):
         batch = unresolved_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for caller_id, callee_id in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (a:Method), (b:RestCall) "
                 "WHERE a.id = $caller AND b.id = $callee "
                 "CREATE (a)-[:UNRESOLVED_CALL]->(b)",
                 {"caller": caller_id, "callee": callee_id},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # -----------------------------------------------------------------------
     # Phase 4 — relationship edges (serial, batched transactions)
@@ -811,60 +897,60 @@ def index_repo(
         batch = contains_class_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for fid, cid in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (f:File), (c:Class) "
                 "WHERE f.id = $fid AND c.id = $cid "
                 "CREATE (f)-[:CONTAINS_CLASS]->(c)",
                 {"fid": fid, "cid": cid},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # Flush CONTAINS_METHOD edges
     for _batch_start in range(0, max(1, len(contains_method_edges)), _EDGE_BATCH_SIZE):
         batch = contains_method_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for cid, mid in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (c:Class), (m:Method) "
                 "WHERE c.id = $cid AND m.id = $mid "
                 "CREATE (c)-[:CONTAINS_METHOD]->(m)",
                 {"cid": cid, "mid": mid},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # Flush EXPOSES edges (Repo → Endpoint)
     for _batch_start in range(0, max(1, len(exposes_edges)), _EDGE_BATCH_SIZE):
         batch = exposes_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for eid in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (r:Repo), (e:Endpoint) "
                 "WHERE r.id = $rid AND e.id = $eid "
                 "CREATE (r)-[:EXPOSES]->(e)",
                 {"rid": repo_id, "eid": eid},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # Flush HAS_RELATION edges (Class → EntityRelation)
     for _batch_start in range(0, max(1, len(has_relation_edges)), _EDGE_BATCH_SIZE):
         batch = has_relation_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for cid, eid in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (c:Class), (e:EntityRelation) "
                 "WHERE c.id = $cid AND e.id = $eid "
                 "CREATE (c)-[:HAS_RELATION]->(e)",
                 {"cid": cid, "eid": eid},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # -----------------------------------------------------------------------
     # Phase 5 — Inheritance edges (batched transactions)
@@ -896,26 +982,26 @@ def index_repo(
         batch = extends_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for cid, pid in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:EXTENDS]->(b)",
                 {"cid": cid, "pid": pid},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # Flush IMPLEMENTS edges
     for _batch_start in range(0, max(1, len(implements_edges)), _EDGE_BATCH_SIZE):
         batch = implements_edges[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for cid, pid in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (a:Class), (b:Class) WHERE a.id = $cid AND b.id = $pid CREATE (a)-[:IMPLEMENTS]->(b)",
                 {"cid": cid, "pid": pid},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     # -----------------------------------------------------------------------
     # Phase 6 — Virtual dispatch fan-out (depends on Phase 5 EXTENDS/IMPLEMENTS edges)
@@ -976,15 +1062,15 @@ def index_repo(
         batch = dedup_fanout[_batch_start: _batch_start + _EDGE_BATCH_SIZE]
         if not batch:
             break
-        conn.execute("BEGIN TRANSACTION")
+        writer.execute("BEGIN TRANSACTION")
         for caller_id, callee_id, callee_name in batch:
-            conn.execute(
+            writer.execute(
                 "MATCH (a:Method), (b:Method) "
                 "WHERE a.id = $caller AND b.id = $callee "
                 "CREATE (a)-[:CALLS {callee_name: $callee_name, caller_arg_pos: $caller_arg_pos, callee_param_pos: $callee_param_pos}]->(b)",
                 {"caller": caller_id, "callee": callee_id, "callee_name": callee_name,
                  "caller_arg_pos": -1, "callee_param_pos": -1},
             )
-        conn.execute("COMMIT")
+        writer.execute("COMMIT")
 
     return counters

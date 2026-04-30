@@ -64,6 +64,18 @@ def main() -> None:
         help="Path to the KuzuDB database file (default: ~/.dedalus/dedalus.db)",
     )
 
+    # ---- write-server ----
+    ws_parser = subparsers.add_parser(
+        "write-server",
+        help="Start the write-serialization server (server mode only)",
+    )
+    ws_parser.add_argument("--port", type=int, default=7701)
+    ws_parser.add_argument(
+        "--db",
+        default=_DEFAULT_DB_PATH,
+        help="Path to the KuzuDB database file (default: ~/.dedalus/dedalus.db)",
+    )
+
     # ---- legacy flat args: python -m dedalus --repo ... --name ... ----
     # Keep backwards compatibility: if the first arg starts with '--', treat
     # the whole invocation as an implicit 'index' command.
@@ -99,6 +111,15 @@ def main() -> None:
             print(f"  {k}: {v}")
         if skipped:
             print(f"  files_skipped (unchanged): {skipped}")
+        return
+
+    if args.command == "write-server":
+        import uvicorn
+        import os as _os
+        from dedalus.write_server import app
+        _os.environ.setdefault("DEDALUS_DB_PATH", args.db)
+        print(f"\n  Dedalus Write Server  ->  http://localhost:{args.port}\n  Press Ctrl+C to stop.\n")
+        uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
         return
 
     # Legacy mode: re-parse with flat args
