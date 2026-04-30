@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import kuzu
 
-SCHEMA_VERSION: int = 4
+SCHEMA_VERSION: int = 5
 
 _NODE_TABLES = [
     """CREATE NODE TABLE Repo(
@@ -17,6 +17,13 @@ _NODE_TABLES = [
         language STRING,
         repo_id STRING,
         blob_hash STRING DEFAULT '',
+        branch_name STRING DEFAULT 'master',
+        PRIMARY KEY(id)
+    )""",
+    """CREATE NODE TABLE Branch(
+        id STRING,
+        name STRING,
+        repo_id STRING,
         PRIMARY KEY(id)
     )""",
     """CREATE NODE TABLE Class(
@@ -82,6 +89,7 @@ _REL_TABLES = [
     "CREATE REL TABLE CONTAINS_METHOD(FROM Class TO Method)",
     "CREATE REL TABLE EXPOSES(FROM Repo TO Endpoint)",
     "CREATE REL TABLE DEPENDS_ON(FROM Repo TO Repo)",
+    "CREATE REL TABLE HAS_BRANCH(FROM Repo TO Branch)",
     "CREATE REL TABLE EXTENDS(FROM Class TO Class)",
     "CREATE REL TABLE IMPLEMENTS(FROM Class TO Class)",
     "CREATE REL TABLE HAS_RELATION(FROM Class TO EntityRelation)",
@@ -95,6 +103,7 @@ _DROP_REL_TABLES = [
     "CONTAINS_METHOD",
     "EXPOSES",
     "DEPENDS_ON",
+    "HAS_BRANCH",
     "EXTENDS",
     "IMPLEMENTS",
     "HAS_RELATION",
@@ -107,6 +116,7 @@ _DROP_NODE_TABLES = [
     "Method",
     "Class",
     "File",
+    "Branch",
     "Repo",
 ]
 

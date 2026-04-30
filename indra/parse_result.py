@@ -19,7 +19,8 @@ class ParseResult:
     file_path: str        # str, not Path — easier to pickle across processes
     lang: str
     repo_id: str
-    blob_hash: str = ""   # git blob hash — stored in DB for incremental re-index
+    blob_hash: str = ""        # git blob hash — stored in DB for incremental re-index
+    branch_name: str = "master"
 
     # Raw source bytes — kept so the main process can re-parse for resolve_calls
     # without re-reading from disk (avoids TOCTOU and second I/O).

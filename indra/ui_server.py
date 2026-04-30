@@ -451,7 +451,26 @@ class _DB:
             log.error("repos(): %s", exc)
             return []
 
-    def graph_data(self, repo_name: str) -> dict:
+    def branches(self, repo_name: str = "") -> list[dict]:
+        if self._conn is None:
+            return []
+        try:
+            if repo_name:
+                r = self._conn.execute(
+                    "MATCH (repo:Repo)-[:HAS_BRANCH]->(b:Branch) WHERE repo.name = $n RETURN b.name",
+                    {"n": repo_name},
+                )
+            else:
+                r = self._conn.execute("MATCH (b:Branch) RETURN DISTINCT b.name")
+            rows = []
+            while r.has_next():
+                rows.append({"name": r.get_next()[0]})
+            return rows
+        except Exception as exc:
+            log.error("branches(%r): %s", repo_name, exc)
+            return []
+
+    def graph_data(self, repo_name: str, branch: str = "") -> dict:
         """Return ALL nodes+edges for a repo in a single payload.
 
         Kinds returned:
@@ -473,20 +492,24 @@ class _DB:
             if not r.has_next():
                 return {"nodes": [], "edges": []}
             repo_id = r.get_next()[0]
-            return self._graph_all(repo_id)
+            return self._graph_all(repo_id, branch_filter=branch)
         except Exception as exc:
             log.error("graph_data(%r): %s", repo_name, exc)
             return {"nodes": [], "edges": []}
 
-    def _graph_all(self, repo_id: str) -> dict:
+    def _graph_all(self, repo_id: str, branch_filter: str = "") -> dict:
         nodes: list[dict] = []
         edges: list[dict] = []
 
         # ── Classes & interfaces ──────────────────────────────────────────
+        branch_clause = " AND f.branch_name = $branch" if branch_filter else ""
+        qparams: dict = {"rid": repo_id}
+        if branch_filter:
+            qparams["branch"] = branch_filter
         r = self._conn.execute(
-            "MATCH (f:File)-[:CONTAINS_CLASS]->(c:Class) WHERE c.repo_id = $rid "
+            f"MATCH (f:File)-[:CONTAINS_CLASS]->(c:Class) WHERE c.repo_id = $rid{branch_clause} "
             "RETURN c.id, c.name, c.fqn, c.is_interface, f.path",
-            {"rid": repo_id},
+            qparams,
         )
         class_rows = self._rows(r, ["id", "name", "fqn", "is_interface", "file_path"])
         class_ids = {row["id"] for row in class_rows}
@@ -516,10 +539,10 @@ class _DB:
 
         # ── Methods ───────────────────────────────────────────────────────
         r3 = self._conn.execute(
-            "MATCH (f:File)-[:CONTAINS_CLASS]->(c:Class)-[:CONTAINS_METHOD]->(m:Method) "
-            "WHERE c.repo_id = $rid "
+            f"MATCH (f:File)-[:CONTAINS_CLASS]->(c:Class)-[:CONTAINS_METHOD]->(m:Method) "
+            f"WHERE c.repo_id = $rid{branch_clause} "
             "RETURN m.id, m.name, m.fqn, c.id AS class_id, m.generated, f.path",
-            {"rid": repo_id},
+            qparams,
         )
         method_rows = self._rows(r3, ["id", "name", "fqn", "class_id", "generated", "file_path"])
         method_ids = {row["id"] for row in method_rows}
@@ -808,6 +831,11 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
     )
     if not repo_name and repos:
         repo_name = repos[0]["name"]
+    branches = db.branches(repo_name)
+    branch_options = '<option value="">All branches</option>' + "".join(
+        f'<option value="{_esc(b["name"])}">{_esc(b["name"])}</option>'
+        for b in branches
+    )
 
     return _html_page("Call Graph", f"""
 <h1>Call Graph</h1>
@@ -816,6 +844,9 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px;">
   <select id="repoSelect" style="background:#1e2130;border:1px solid #2d3148;border-radius:8px;padding:8px 14px;color:#e2e8f0;font-size:0.9rem;outline:none;">
     {repo_options}
+  </select>
+  <select id="branchSelect" style="background:#1e2130;border:1px solid #2d3148;border-radius:8px;padding:8px 14px;color:#e2e8f0;font-size:0.9rem;outline:none;">
+    {branch_options}
   </select>
 
   <!-- View presets: control which kinds are visible, not which data is fetched -->
@@ -1155,7 +1186,8 @@ function edgeVisual(e, idx) {{
 
 // ── Load data ─────────────────────────────────────────────────────────────
 function loadGraph() {{
-  const repo = document.getElementById('repoSelect').value;
+  const repo   = document.getElementById('repoSelect').value;
+  const branch = document.getElementById('branchSelect').value;
   if (!repo) return;
   loadingDiv.style.display = 'block';
   loadingDiv.textContent   = 'Loading…';
@@ -1169,7 +1201,8 @@ function loadGraph() {{
   showOrphans = false;
   rawData = null;
 
-  fetch(`/api/graph?repo=${{encodeURIComponent(repo)}}`)
+  const branchParam = branch ? `&branch=${{encodeURIComponent(branch)}}` : '';
+  fetch(`/api/graph?repo=${{encodeURIComponent(repo)}}${{branchParam}}`)
     .then(r => r.json())
     .then(data => {{
       rawData = data;
@@ -1231,7 +1264,20 @@ function loadGraph() {{
 }}
 
 // ── Wiring ────────────────────────────────────────────────────────────────
-document.getElementById('repoSelect').onchange = loadGraph;
+document.getElementById('repoSelect').onchange = () => {{
+  // When repo changes, reload branch list then re-render graph
+  const repo = document.getElementById('repoSelect').value;
+  fetch(`/api/branches?repo=${{encodeURIComponent(repo)}}`)
+    .then(r => r.json())
+    .then(branches => {{
+      const sel = document.getElementById('branchSelect');
+      sel.innerHTML = '<option value="">All branches</option>' +
+        branches.map(b => `<option value="${{b}}">${{b}}</option>`).join('');
+    }})
+    .catch(() => {{}})
+    .finally(() => loadGraph());
+}};
+document.getElementById('branchSelect').onchange = loadGraph;
 document.getElementById('fitBtn').onclick = () => network && network.fit({{ animation: true }});
 document.getElementById('inheritanceToggle').onclick = () => {{
     const btn = document.getElementById('inheritanceToggle');
@@ -1326,8 +1372,15 @@ def _make_app(db: _DB, db_path: str):
     async def api_graph(request: Request):
         from starlette.responses import JSONResponse  # noqa: PLC0415
         repo_name = request.query_params.get("repo", "")
-        data = db.graph_data(repo_name)
+        branch = request.query_params.get("branch", "")
+        data = db.graph_data(repo_name, branch=branch)
         return JSONResponse(data)
+
+    async def api_branches(request: Request):
+        from starlette.responses import JSONResponse  # noqa: PLC0415
+        repo_name = request.query_params.get("repo", "")
+        branches = db.branches(repo_name)
+        return JSONResponse([b["name"] for b in branches])
 
     async def index_get(request: Request) -> HTMLResponse:
         return HTMLResponse(_page_index_form())
@@ -1345,6 +1398,7 @@ def _make_app(db: _DB, db_path: str):
         Route("/symbol", symbol),
         Route("/graph", graph),
         Route("/api/graph", api_graph),
+        Route("/api/branches", api_branches),
         Route("/endpoints", endpoints),
         Route("/index", index_get, methods=["GET"]),
         Route("/index", index_post, methods=["POST"]),

@@ -96,6 +96,7 @@ def _parse_file(args: tuple) -> ParseResult:
         file_id         : str            — pre-computed md5 hex digest of the path
         repo_id         : str            — pre-computed md5 hex digest of the repo name
         blob_hash       : str            — git blob hash of the file content
+        branch_name     : str            — branch name this file is being indexed under
         constant_index  : dict[str, str] — cross-file constant index (may be empty)
 
     Returns:
@@ -105,7 +106,7 @@ def _parse_file(args: tuple) -> ParseResult:
     the DB must stay in the main process.  All imports below are safe to
     run in a child process.
     """
-    file_path_str, lang, file_id, repo_id, blob_hash, constant_index = args
+    file_path_str, lang, file_id, repo_id, blob_hash, branch_name, constant_index = args
 
     # Import inside the function so child processes get a clean slate and we
     # avoid accidentally pickling module-level state.
@@ -122,6 +123,7 @@ def _parse_file(args: tuple) -> ParseResult:
         lang=lang,
         repo_id=repo_id,
         blob_hash=blob_hash,
+        branch_name=branch_name,
     )
 
     src = file_path.read_bytes()
@@ -299,6 +301,10 @@ def _delete_repo_data(conn: kuzu.Connection, repo_id: str) -> None:
     conn.execute("MATCH (c:Class)-[r:HAS_RELATION]->(e:EntityRelation) WHERE c.repo_id = $rid DELETE r", rid)
     conn.execute("MATCH (n:EntityRelation) WHERE n.repo_id = $rid DELETE n", rid)
 
+    # HAS_BRANCH edges and Branch nodes
+    conn.execute("MATCH (r:Repo)-[e:HAS_BRANCH]->(b:Branch) WHERE r.id = $rid DELETE e", rid)
+    conn.execute("MATCH (n:Branch) WHERE n.repo_id = $rid DELETE n", rid)
+
     # --- node tables ---
     conn.execute("MATCH (n:RestCall) WHERE n.repo_id = $rid DELETE n", rid)
     conn.execute("MATCH (n:Endpoint) WHERE n.repo_id = $rid DELETE n", rid)
@@ -318,6 +324,7 @@ def index_repo(
     db_path: "Path | str",
     max_workers: int | None = None,
     force: bool = False,
+    branch: str = "master",
 ) -> dict:
     """Index *repo_path* into a KuzuDB database at *db_path*.
 
@@ -338,6 +345,10 @@ def index_repo(
         last index run are skipped — making re-index take seconds instead of
         minutes for typical code-review cycles.  Pass True to re-parse every
         file regardless of hash (equivalent to the old behaviour).
+    branch:
+        Branch name to tag indexed files with (default: ``"master"``).
+        Allows the same repo to be indexed at multiple branches and queried
+        separately via the ``--branch`` filter.
 
     Returns a summary dict::
 
@@ -362,8 +373,9 @@ def index_repo(
     if not _has_tables(conn):
         init_schema(conn)
 
-    # 2. Stable repo id
+    # 2. Stable repo id and branch id
     repo_id = hashlib.md5(repo_name.encode()).hexdigest()
+    branch_id = hashlib.md5(f"{repo_id}:{branch}".encode()).hexdigest()
 
     # 3. Incremental mode: load hashes stored from the previous index run.
     #    On first index (or --force) stored_hashes is empty → all files parsed.
@@ -384,6 +396,18 @@ def index_repo(
                 "CREATE (:Repo {id: $id, name: $name, root_path: $root_path})",
                 {"id": repo_id, "name": repo_name, "root_path": str(repo_path)},
             )
+
+    # Upsert the Branch node and HAS_BRANCH edge (idempotent — skip if already exists)
+    rb = conn.execute("MATCH (b:Branch) WHERE b.id = $bid RETURN b.id", {"bid": branch_id})
+    if not rb.has_next():
+        conn.execute(
+            "CREATE (:Branch {id: $id, name: $name, repo_id: $repo_id})",
+            {"id": branch_id, "name": branch, "repo_id": repo_id},
+        )
+        conn.execute(
+            "MATCH (r:Repo), (b:Branch) WHERE r.id = $rid AND b.id = $bid CREATE (r)-[:HAS_BRANCH]->(b)",
+            {"rid": repo_id, "bid": branch_id},
+        )
 
     # -----------------------------------------------------------------------
     # 5. Walk repo — compute blob hash per file; skip unchanged in incr. mode
@@ -419,7 +443,7 @@ def index_repo(
         if file_path_str in stored_hashes:
             _delete_file_data(conn, file_path_str, repo_id)
 
-        work_items_base.append((file_path_str, lang, file_id, repo_id, blob_hash))
+        work_items_base.append((file_path_str, lang, file_id, repo_id, blob_hash, branch))
 
     # Delete files removed from the repo entirely
     for removed_path in set(stored_hashes) - current_paths:
@@ -435,7 +459,8 @@ def index_repo(
     constant_index = _build_constant_index(all_java_items)
 
     # Pack constant_index into each work item tuple for _parse_file.
-    work_items: list[tuple] = [(*item[:4], item[4], constant_index) for item in work_items_base]
+    # Tuple layout: (path, lang, file_id, repo_id, blob_hash, branch_name, constant_index)
+    work_items: list[tuple] = [(*item[:6], constant_index) for item in work_items_base]
 
     # -----------------------------------------------------------------------
     # Phase 1 — parse+extract in parallel worker processes
@@ -479,18 +504,19 @@ def index_repo(
     # Accumulate all methods across files for cross-file FQN resolution
     all_methods: list[dict] = []
 
-    for _file_path_str, _lang, file_id, _repo_id, _blob_hash, _const_idx in work_items:
+    for _file_path_str, _lang, file_id, _repo_id, _blob_hash, _branch_name, _const_idx in work_items:
         pr = parse_results[file_id]
 
         # Insert File node
         conn.execute(
-            "CREATE (:File {id: $id, path: $path, language: $language, repo_id: $repo_id, blob_hash: $blob_hash})",
+            "CREATE (:File {id: $id, path: $path, language: $language, repo_id: $repo_id, blob_hash: $blob_hash, branch_name: $branch_name})",
             {
                 "id": file_id,
                 "path": pr.file_path,
                 "language": pr.lang,
                 "repo_id": repo_id,
                 "blob_hash": pr.blob_hash,
+                "branch_name": pr.branch_name,
             },
         )
         counters["files"] += 1

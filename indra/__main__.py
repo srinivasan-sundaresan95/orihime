@@ -30,6 +30,11 @@ def main() -> None:
         default=False,
         help="Re-parse every file even if git blob hash is unchanged (full re-index)",
     )
+    index_parser.add_argument(
+        "--branch",
+        default="master",
+        help="Branch name to tag indexed files with (default: master)",
+    )
 
     # ---- serve ----
     subparsers.add_parser("serve", help="Start the Indra MCP server (stdio transport)")
@@ -88,7 +93,7 @@ def main() -> None:
         return
 
     if args.command == "index":
-        summary = index_repo(args.repo, args.name, args.db, force=args.force)
+        summary = index_repo(args.repo, args.name, args.db, force=args.force, branch=args.branch)
         skipped = summary.pop("files_skipped", 0)
         for k, v in summary.items():
             print(f"  {k}: {v}")

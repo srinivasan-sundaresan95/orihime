@@ -566,6 +566,43 @@ def list_repos() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Tool 11b: list_branches
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_branches(repo_name: str = "") -> list[dict]:
+    """List all indexed branches, optionally filtered by repository.
+
+    Args:
+        repo_name: If provided, only return branches belonging to this repo.
+                   Pass an empty string (the default) to list all repos.
+
+    Returns:
+        List of dicts with keys ``repo_name``, ``branch_name``.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        if repo_name:
+            result = conn.execute(
+                "MATCH (r:Repo)-[:HAS_BRANCH]->(b:Branch) "
+                "WHERE r.name = $repo_name "
+                "RETURN r.name AS repo_name, b.name AS branch_name",
+                {"repo_name": repo_name},
+            )
+        else:
+            result = conn.execute(
+                "MATCH (r:Repo)-[:HAS_BRANCH]->(b:Branch) "
+                "RETURN r.name AS repo_name, b.name AS branch_name",
+            )
+        return _rows(result, ["repo_name", "branch_name"])
+    except Exception as exc:
+        log.error("list_branches(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
 # Tool 12: find_implementations
 # ---------------------------------------------------------------------------
 
@@ -719,7 +756,12 @@ def find_eager_fetches(repo_name: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def index_repo_tool(repo_path: str, repo_name: str) -> dict:
+def index_repo_tool(
+    repo_path: str,
+    repo_name: str,
+    branch: str = "master",
+    force: bool = False,
+) -> dict:
     """Index a source repository into the Indra knowledge graph.
 
     After indexing, all other query tools will reflect the new data.
@@ -728,23 +770,25 @@ def index_repo_tool(repo_path: str, repo_name: str) -> dict:
         repo_path: Absolute path to the repository root on disk.
         repo_name: Logical name to identify the repo in queries
                    (e.g. ``point-bank-bff``).
+        branch: Branch name to tag this index run with (default: ``"master"``).
+                Index the same repo under different branch names to compare
+                branches side-by-side.
+        force: When True, re-parse every file even if blob hashes are unchanged.
 
     Returns:
         Summary dict with counts: ``repos``, ``files``, ``classes``,
         ``methods``, ``endpoints``, ``rest_calls``, ``call_edges``.
         On failure, returns ``{"error": "<message>"}``.
     """
-    # Import here to avoid circular imports at module load time
     try:
         from indra.indexer import index_repo  # noqa: PLC0415
     except ImportError as exc:
         return {"error": f"indexer not available: {exc}"}
 
     try:
-        summary = index_repo(repo_path, repo_name, _DB_PATH)
-        # Reset connection so the next query picks up the freshly-written data
+        summary = index_repo(repo_path, repo_name, _DB_PATH, branch=branch, force=force)
         _reset_connection()
-        log.info("Indexed %r: %s", repo_name, summary)
+        log.info("Indexed %r@%r: %s", repo_name, branch, summary)
         return summary
     except Exception as exc:
         log.error("index_repo_tool(%r, %r): %s", repo_path, repo_name, exc)
