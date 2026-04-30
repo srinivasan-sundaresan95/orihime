@@ -24,6 +24,12 @@ def main() -> None:
         default=_DEFAULT_DB_PATH,
         help="Path to the KuzuDB database file (default: ~/.indra/indra.db)",
     )
+    index_parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-parse every file even if git blob hash is unchanged (full re-index)",
+    )
 
     # ---- serve ----
     subparsers.add_parser("serve", help="Start the Indra MCP server (stdio transport)")
@@ -82,9 +88,12 @@ def main() -> None:
         return
 
     if args.command == "index":
-        summary = index_repo(args.repo, args.name, args.db)
+        summary = index_repo(args.repo, args.name, args.db, force=args.force)
+        skipped = summary.pop("files_skipped", 0)
         for k, v in summary.items():
             print(f"  {k}: {v}")
+        if skipped:
+            print(f"  files_skipped (unchanged): {skipped}")
         return
 
     # Legacy mode: re-parse with flat args

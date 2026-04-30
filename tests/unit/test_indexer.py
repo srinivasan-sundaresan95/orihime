@@ -2,17 +2,18 @@
 from __future__ import annotations
 
 import pathlib
+import shutil
 import tempfile
 
 import kuzu
 import pytest
 
-from indra.indexer import index_repo
+from indra.indexer import index_repo, _git_blob_hash
 
 # The fixtures directory contains Sample.java — a single-file mini-repo
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"
 
-_SUMMARY_KEYS = {"repos", "files", "classes", "methods", "endpoints", "rest_calls", "call_edges", "inheritance_edges", "entity_relations"}
+_SUMMARY_KEYS = {"repos", "files", "files_skipped", "classes", "methods", "endpoints", "rest_calls", "call_edges", "inheritance_edges", "entity_relations"}
 
 
 def _make_db_path() -> pathlib.Path:
@@ -48,13 +49,32 @@ def test_index_repo_returns_summary_dict():
 
 
 def test_index_repo_idempotent():
-    """Indexing the same repo twice must not raise and must yield identical counts."""
+    """Indexing the same repo twice must not raise; DB node counts must be unchanged."""
     db_path = _make_db_path()
-    summary1 = index_repo(FIXTURES_DIR, "test-repo", db_path)
-    summary2 = index_repo(FIXTURES_DIR, "test-repo", db_path)
+    index_repo(FIXTURES_DIR, "test-repo", db_path)
 
-    assert summary1 == summary2, (
-        f"Second index run produced different counts:\n  first={summary1}\n  second={summary2}"
+    db = kuzu.Database(str(db_path))
+    conn = kuzu.Connection(db)
+
+    def _count(table: str) -> int:
+        r = conn.execute(f"MATCH (n:{table}) RETURN count(n)")
+        return r.get_next()[0]
+
+    counts_before = {t: _count(t) for t in ("Class", "Method", "Endpoint", "File")}
+    del db, conn
+
+    index_repo(FIXTURES_DIR, "test-repo", db_path)
+
+    db2 = kuzu.Database(str(db_path))
+    conn2 = kuzu.Connection(db2)
+
+    def _count2(table: str) -> int:
+        r = conn2.execute(f"MATCH (n:{table}) RETURN count(n)")
+        return r.get_next()[0]
+
+    counts_after = {t: _count2(t) for t in ("Class", "Method", "Endpoint", "File")}
+    assert counts_before == counts_after, (
+        f"DB counts changed on second index run:\n  before={counts_before}\n  after={counts_after}"
     )
 
 
@@ -157,8 +177,108 @@ def test_parallel_matches_serial():
     summary_serial = index_repo(FIXTURES_DIR, "test-repo", db_serial, max_workers=1)
     summary_parallel = index_repo(FIXTURES_DIR, "test-repo", db_parallel, max_workers=4)
 
-    assert summary_serial == summary_parallel, (
-        f"Serial and parallel indexing produced different counts:\n"
-        f"  serial  ={summary_serial}\n"
-        f"  parallel={summary_parallel}"
+    comparable_keys = _SUMMARY_KEYS - {"files_skipped"}
+    for key in comparable_keys:
+        assert summary_serial[key] == summary_parallel[key], (
+            f"Key '{key}' differs: serial={summary_serial[key]}, parallel={summary_parallel[key]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. Incremental re-index: unchanged files are skipped
+# ---------------------------------------------------------------------------
+
+
+def test_incremental_skips_unchanged_files():
+    """Second index run without changes must skip all files (files_skipped == files)."""
+    db_path = _make_db_path()
+    summary1 = index_repo(FIXTURES_DIR, "test-repo", db_path, max_workers=1)
+    summary2 = index_repo(FIXTURES_DIR, "test-repo", db_path, max_workers=1)
+
+    # On the second run nothing changed → all files should be skipped
+    assert summary2["files_skipped"] == summary1["files"], (
+        f"Expected all {summary1['files']} files to be skipped, "
+        f"but got files_skipped={summary2['files_skipped']}"
     )
+    assert summary2["files"] == 0, (
+        f"Expected 0 files re-parsed, but got {summary2['files']}"
+    )
+
+
+def test_incremental_reparses_modified_file():
+    """When one file changes, only that file is re-parsed; others are skipped."""
+    # Work in a temp copy so we can modify files without touching the real fixtures
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_copy = pathlib.Path(tmpdir) / "repo"
+        shutil.copytree(FIXTURES_DIR, repo_copy)
+
+        db_path = _make_db_path()
+        summary1 = index_repo(repo_copy, "test-repo", db_path, max_workers=1)
+        total_files = summary1["files"]
+
+        # Touch Sample.java content (append a comment) so its blob hash changes
+        sample = repo_copy / "Sample.java"
+        original = sample.read_text()
+        sample.write_text(original + "\n// incremental-test-marker\n")
+
+        summary2 = index_repo(repo_copy, "test-repo", db_path, max_workers=1)
+
+        # Exactly one file should be re-parsed, the rest skipped
+        assert summary2["files"] == 1, (
+            f"Expected exactly 1 file re-parsed, got {summary2['files']}"
+        )
+        assert summary2["files_skipped"] == total_files - 1, (
+            f"Expected {total_files - 1} skipped, got {summary2['files_skipped']}"
+        )
+
+
+def test_force_reparses_all_files():
+    """--force flag must re-parse every file even when blob hashes are unchanged."""
+    db_path = _make_db_path()
+    summary1 = index_repo(FIXTURES_DIR, "test-repo", db_path, max_workers=1)
+    summary_force = index_repo(FIXTURES_DIR, "test-repo", db_path, max_workers=1, force=True)
+
+    assert summary_force["files_skipped"] == 0, (
+        "Expected 0 files skipped with --force, "
+        f"got {summary_force['files_skipped']}"
+    )
+    assert summary_force["files"] == summary1["files"], (
+        f"--force should re-parse all {summary1['files']} files, "
+        f"but got {summary_force['files']}"
+    )
+
+
+def test_blob_hash_stored_in_db():
+    """File nodes must have a non-empty blob_hash after indexing."""
+    db_path = _make_db_path()
+    index_repo(FIXTURES_DIR, "test-repo", db_path, max_workers=1)
+
+    db = kuzu.Database(str(db_path))
+    conn = kuzu.Connection(db)
+
+    result = conn.execute("MATCH (f:File) RETURN f.blob_hash")
+    hashes: list[str] = []
+    while result.has_next():
+        hashes.append(result.get_next()[0])
+
+    assert hashes, "No File nodes found"
+    assert all(h for h in hashes), (
+        f"Some File nodes have empty blob_hash: {[h for h in hashes if not h]}"
+    )
+    # All hashes should be valid hex strings (40-char SHA-1)
+    for h in hashes:
+        assert len(h) == 40 and all(c in "0123456789abcdef" for c in h), (
+            f"Invalid blob_hash format: {h!r}"
+        )
+
+
+def test_git_blob_hash_fallback_outside_git():
+    """_git_blob_hash falls back to SHA-1 of bytes for files outside any git repo."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Write a file in an isolated dir that is NOT a git repo
+        isolated = pathlib.Path(tmpdir) / "isolated.java"
+        isolated.write_bytes(b"class A {}")
+
+        h = _git_blob_hash(isolated)
+        assert len(h) == 40
+        assert all(c in "0123456789abcdef" for c in h)

@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import multiprocessing
 import os
+import subprocess
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -94,6 +95,7 @@ def _parse_file(args: tuple) -> ParseResult:
         lang            : str            — language key (e.g. "java", "kotlin")
         file_id         : str            — pre-computed md5 hex digest of the path
         repo_id         : str            — pre-computed md5 hex digest of the repo name
+        blob_hash       : str            — git blob hash of the file content
         constant_index  : dict[str, str] — cross-file constant index (may be empty)
 
     Returns:
@@ -103,7 +105,7 @@ def _parse_file(args: tuple) -> ParseResult:
     the DB must stay in the main process.  All imports below are safe to
     run in a child process.
     """
-    file_path_str, lang, file_id, repo_id, constant_index = args
+    file_path_str, lang, file_id, repo_id, blob_hash, constant_index = args
 
     # Import inside the function so child processes get a clean slate and we
     # avoid accidentally pickling module-level state.
@@ -119,6 +121,7 @@ def _parse_file(args: tuple) -> ParseResult:
         file_path=file_path_str,
         lang=lang,
         repo_id=repo_id,
+        blob_hash=blob_hash,
     )
 
     src = file_path.read_bytes()
@@ -152,6 +155,105 @@ def _parse_file(args: tuple) -> ParseResult:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _git_blob_hash(file_path: Path) -> str:
+    """Return the git blob hash for *file_path*.
+
+    Uses ``git hash-object <path>`` when the file is inside a git repo —
+    this is the canonical content hash git uses internally, immune to
+    mtime/metadata changes and identical to what ``git ls-files`` reports.
+
+    Falls back to SHA-1 of raw file bytes when git is unavailable or the
+    file is outside any git repo (e.g. temp fixtures in tests).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", str(file_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: SHA-1 of raw bytes
+    return hashlib.sha1(file_path.read_bytes()).hexdigest()
+
+
+def _load_stored_hashes(conn: kuzu.Connection, repo_id: str) -> dict[str, str]:
+    """Return {file_path: blob_hash} for all File nodes in *repo_id*."""
+    r = conn.execute(
+        "MATCH (f:File) WHERE f.repo_id = $rid RETURN f.path, f.blob_hash",
+        {"rid": repo_id},
+    )
+    stored: dict[str, str] = {}
+    while r.has_next():
+        path, blob_hash = r.get_next()
+        stored[path] = blob_hash or ""
+    return stored
+
+
+def _delete_file_data(conn: kuzu.Connection, file_path_str: str, repo_id: str) -> None:
+    """Delete all graph data for a single file (used during incremental re-index)."""
+    r = conn.execute(
+        "MATCH (f:File) WHERE f.path = $path AND f.repo_id = $rid RETURN f.id",
+        {"path": file_path_str, "rid": repo_id},
+    )
+    if not r.has_next():
+        return
+    file_id = r.get_next()[0]
+    p = {"fid": file_id}
+
+    # Collect method_ids and class_ids for this file (needed for node cleanup)
+    r2 = conn.execute("MATCH (m:Method) WHERE m.file_id = $fid RETURN m.id", p)
+    method_ids: list[str] = []
+    while r2.has_next():
+        method_ids.append(r2.get_next()[0])
+
+    r3 = conn.execute("MATCH (c:Class) WHERE c.file_id = $fid RETURN c.id", p)
+    class_ids: list[str] = []
+    while r3.has_next():
+        class_ids.append(r3.get_next()[0])
+
+    # Edges on methods — KuzuDB requires each param dict to contain ONLY used params
+    conn.execute("MATCH (m:Method)-[e:CALLS]->(:Method) WHERE m.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (:Method)-[e:CALLS]->(m:Method) WHERE m.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (m:Method)-[e:CALLS_REST]->(:Endpoint) WHERE m.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (m:Method)-[e:UNRESOLVED_CALL]->(:RestCall) WHERE m.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (:Class)-[e:CONTAINS_METHOD]->(m:Method) WHERE m.file_id = $fid DELETE e", p)
+    # Inheritance and entity-relation edges on classes in this file
+    conn.execute("MATCH (c:Class)-[e:EXTENDS]->(:Class) WHERE c.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (:Class)-[e:EXTENDS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (c:Class)-[e:IMPLEMENTS]->(:Class) WHERE c.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (:Class)-[e:IMPLEMENTS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (c:Class)-[e:HAS_RELATION]->(:EntityRelation) WHERE c.file_id = $fid DELETE e", p)
+    conn.execute("MATCH (c:Class)-[e:CONTAINS_CLASS]->() WHERE c.file_id = $fid DELETE e", p)
+    conn.execute("MATCH ()-[e:CONTAINS_CLASS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
+    # Node cleanup — orphaned RestCalls/EntityRelations referencing this file's methods/classes
+    for mid in method_ids:
+        conn.execute(
+            "MATCH (n:RestCall) WHERE n.caller_method_id = $mid DELETE n",
+            {"mid": mid},
+        )
+        # Remove EXPOSES edges before deleting Endpoint nodes (KuzuDB requires edge-first delete)
+        conn.execute(
+            "MATCH (:Repo)-[e:EXPOSES]->(ep:Endpoint) WHERE ep.handler_method_id = $mid DELETE e",
+            {"mid": mid},
+        )
+        conn.execute(
+            "MATCH (n:Endpoint) WHERE n.handler_method_id = $mid DELETE n",
+            {"mid": mid},
+        )
+    for cid in class_ids:
+        conn.execute(
+            "MATCH (n:EntityRelation) WHERE n.source_class_id = $cid DELETE n",
+            {"cid": cid},
+        )
+    conn.execute("MATCH (m:Method) WHERE m.file_id = $fid DELETE m", p)
+    conn.execute("MATCH (n:Class) WHERE n.file_id = $fid DELETE n", p)
+    conn.execute("MATCH (f:File) WHERE f.id = $fid DELETE f", p)
+
 
 def _has_tables(conn: kuzu.Connection) -> bool:
     """Return True if any tables already exist in the database."""
@@ -215,6 +317,7 @@ def index_repo(
     repo_name: str,
     db_path: "Path | str",
     max_workers: int | None = None,
+    force: bool = False,
 ) -> dict:
     """Index *repo_path* into a KuzuDB database at *db_path*.
 
@@ -230,17 +333,20 @@ def index_repo(
         Number of worker processes for the parallel parse+extract phase.
         ``None`` (default) uses ``os.cpu_count()``.
         Pass ``1`` in tests to avoid ProcessPoolExecutor startup overhead.
+    force:
+        When False (default) files whose git blob hash is unchanged since the
+        last index run are skipped — making re-index take seconds instead of
+        minutes for typical code-review cycles.  Pass True to re-parse every
+        file regardless of hash (equivalent to the old behaviour).
 
     Returns a summary dict::
 
         {
             "repos": 1,
-            "files": N,
+            "files": N,        # total files on disk
+            "files_skipped": N, # unchanged files skipped
             "classes": N,
-            "methods": N,
-            "endpoints": N,
-            "rest_calls": N,
-            "call_edges": N,
+            ...
         }
     """
     repo_path = Path(repo_path)
@@ -259,21 +365,33 @@ def index_repo(
     # 2. Stable repo id
     repo_id = hashlib.md5(repo_name.encode()).hexdigest()
 
-    # 3. Delete stale data for this repo (idempotent re-index)
-    _delete_repo_data(conn, repo_id)
+    # 3. Incremental mode: load hashes stored from the previous index run.
+    #    On first index (or --force) stored_hashes is empty → all files parsed.
+    stored_hashes: dict[str, str] = {} if force else _load_stored_hashes(conn, repo_id)
 
-    # 4. Insert Repo node
-    conn.execute(
-        "CREATE (:Repo {id: $id, name: $name, root_path: $root_path})",
-        {"id": repo_id, "name": repo_name, "root_path": str(repo_path)},
-    )
+    # 4. Full delete only on --force or first-time index; otherwise delete
+    #    only changed/removed files below.
+    if force or not stored_hashes:
+        _delete_repo_data(conn, repo_id)
+        conn.execute(
+            "CREATE (:Repo {id: $id, name: $name, root_path: $root_path})",
+            {"id": repo_id, "name": repo_name, "root_path": str(repo_path)},
+        )
+    else:
+        r = conn.execute("MATCH (r:Repo) WHERE r.id = $rid RETURN r.id", {"rid": repo_id})
+        if not r.has_next():
+            conn.execute(
+                "CREATE (:Repo {id: $id, name: $name, root_path: $root_path})",
+                {"id": repo_id, "name": repo_name, "root_path": str(repo_path)},
+            )
 
     # -----------------------------------------------------------------------
-    # 5. Walk repo — collect (file_path, lang, file_id, repo_id) tuples
+    # 5. Walk repo — compute blob hash per file; skip unchanged in incr. mode
     # -----------------------------------------------------------------------
     counters = {
         "repos": 1,
         "files": 0,
+        "files_skipped": 0,
         "classes": 0,
         "methods": 0,
         "endpoints": 0,
@@ -283,18 +401,41 @@ def index_repo(
         "entity_relations": 0,
     }
 
-    work_items_base: list[tuple[str, str, str, str]] = []
-    for file_path, lang in walk_repo(repo_path):
-        file_id = hashlib.md5(str(file_path).encode()).hexdigest()
-        work_items_base.append((str(file_path), lang, file_id, repo_id))
+    # work_items_base carries blob_hash as 5th element (used to update File node)
+    work_items_base: list[tuple[str, str, str, str, str]] = []
+    current_paths: set[str] = set()
 
-    # Pre-pass: build cross-file constant index from all Java files so that
-    # endpoint annotations referencing static fields (e.g. RequestMapping.WALLET_STATUS)
-    # in other files are resolved to real path strings.
-    constant_index = _build_constant_index(work_items_base)
+    for file_path, lang in walk_repo(repo_path):
+        file_path_str = str(file_path)
+        current_paths.add(file_path_str)
+        blob_hash = _git_blob_hash(file_path)
+        file_id = hashlib.md5(file_path_str.encode()).hexdigest()
+
+        if not force and stored_hashes.get(file_path_str) == blob_hash:
+            counters["files_skipped"] += 1
+            continue
+
+        # Changed or new: purge stale data for this file before re-inserting
+        if file_path_str in stored_hashes:
+            _delete_file_data(conn, file_path_str, repo_id)
+
+        work_items_base.append((file_path_str, lang, file_id, repo_id, blob_hash))
+
+    # Delete files removed from the repo entirely
+    for removed_path in set(stored_hashes) - current_paths:
+        _delete_file_data(conn, removed_path, repo_id)
+
+    # Pre-pass: build cross-file constant index from all Java files (changed + unchanged).
+    # We must pass unchanged files too so constants defined there remain resolvable.
+    all_java_items: list[tuple[str, str, str, str]] = []
+    for file_path, lang in walk_repo(repo_path):
+        if lang == "java":
+            fid = hashlib.md5(str(file_path).encode()).hexdigest()
+            all_java_items.append((str(file_path), lang, fid, repo_id))
+    constant_index = _build_constant_index(all_java_items)
 
     # Pack constant_index into each work item tuple for _parse_file.
-    work_items: list[tuple] = [(*item, constant_index) for item in work_items_base]
+    work_items: list[tuple] = [(*item[:4], item[4], constant_index) for item in work_items_base]
 
     # -----------------------------------------------------------------------
     # Phase 1 — parse+extract in parallel worker processes
@@ -338,17 +479,18 @@ def index_repo(
     # Accumulate all methods across files for cross-file FQN resolution
     all_methods: list[dict] = []
 
-    for _file_path_str, _lang, file_id, _repo_id, _const_idx in work_items:
+    for _file_path_str, _lang, file_id, _repo_id, _blob_hash, _const_idx in work_items:
         pr = parse_results[file_id]
 
         # Insert File node
         conn.execute(
-            "CREATE (:File {id: $id, path: $path, language: $language, repo_id: $repo_id})",
+            "CREATE (:File {id: $id, path: $path, language: $language, repo_id: $repo_id, blob_hash: $blob_hash})",
             {
                 "id": file_id,
                 "path": pr.file_path,
                 "language": pr.lang,
                 "repo_id": repo_id,
+                "blob_hash": pr.blob_hash,
             },
         )
         counters["files"] += 1
