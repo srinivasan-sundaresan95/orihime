@@ -451,13 +451,18 @@ class _DB:
             log.error("repos(): %s", exc)
             return []
 
-    def graph_data(self, repo_name: str, view: str = "class") -> dict:
-        """Return nodes+edges for the call graph of a repo.
+    def graph_data(self, repo_name: str) -> dict:
+        """Return ALL nodes+edges for a repo in a single payload.
 
-        view="class"      — one node per Class, edges = class-to-class call pairs,
-                            UNRESOLVED external targets shown as dependency nodes
-        view="method"     — one node per Method (internal only, top 150 by degree)
-        view="dependency" — class nodes + external dependency stubs only
+        Kinds returned:
+          class     — concrete class
+          interface — Java/Kotlin interface
+          method    — method node (with parent_class_id for grouping)
+          external  — unresolved external call stub (callee_name)
+        Edges:
+          class_call   — class-to-class aggregated CALLS (weight = call count)
+          method_call  — method-to-method CALLS
+          ext_call     — class-to-external via UNRESOLVED_CALL
         """
         if self._conn is None:
             return {"nodes": [], "edges": []}
@@ -468,21 +473,16 @@ class _DB:
             if not r.has_next():
                 return {"nodes": [], "edges": []}
             repo_id = r.get_next()[0]
-
-            if view == "method":
-                return self._graph_method(repo_id)
-            elif view == "dependency":
-                return self._graph_dependency(repo_id)
-            else:
-                return self._graph_class(repo_id)
-
+            return self._graph_all(repo_id)
         except Exception as exc:
-            log.error("graph_data(%r, %r): %s", repo_name, view, exc)
+            log.error("graph_data(%r): %s", repo_name, exc)
             return {"nodes": [], "edges": []}
 
-    def _graph_class(self, repo_id: str) -> dict:
-        """Class-level graph: all classes as nodes, CALLS aggregated to class pairs."""
-        # All classes in this repo
+    def _graph_all(self, repo_id: str) -> dict:
+        nodes: list[dict] = []
+        edges: list[dict] = []
+
+        # ── Classes & interfaces ──────────────────────────────────────────
         r = self._conn.execute(
             "MATCH (c:Class) WHERE c.repo_id = $rid RETURN c.id, c.name, c.fqn, c.is_interface",
             {"rid": repo_id},
@@ -490,7 +490,7 @@ class _DB:
         class_rows = self._rows(r, ["id", "name", "fqn", "is_interface"])
         class_ids = {row["id"] for row in class_rows}
 
-        # Class-to-class call pairs with edge weight
+        # ── Class-to-class call edges (aggregated) ────────────────────────
         r2 = self._conn.execute(
             "MATCH (ca:Class)-[:CONTAINS_METHOD]->(ma:Method)-[:CALLS]->(mb:Method)"
             "<-[:CONTAINS_METHOD]-(cb:Class) "
@@ -498,139 +498,89 @@ class _DB:
             "RETURN ca.id, cb.id, count(*) AS w",
             {"rid": repo_id},
         )
-        edge_rows = self._rows(r2, ["from", "to", "weight"])
+        cc_edges = self._rows(r2, ["from", "to", "weight"])
+        class_degree: dict[str, int] = {}
+        for e in cc_edges:
+            if e["from"] != e["to"]:
+                class_degree[e["from"]] = class_degree.get(e["from"], 0) + e["weight"]
+                edges.append({"from": e["from"], "to": e["to"], "weight": e["weight"], "etype": "class_call"})
 
-        # Count outgoing edges per class for sizing
-        degree: dict[str, int] = {}
-        for e in edge_rows:
-            degree[e["from"]] = degree.get(e["from"], 0) + e["weight"]
-
-        # External dependencies: classes that have UNRESOLVED calls
-        # Group by callee_name prefix to make a stub "external" node per library pattern
-        # (callee_name may not exist in old DBs — guard with fallback)
-        ext_nodes: dict[str, dict] = {}  # ext_id -> node
-        ext_edges: list[dict] = []
-        seen_ext: set[tuple] = set()
-        try:
-            r3 = self._conn.execute(
-                "MATCH (ca:Class)-[:CONTAINS_METHOD]->(ma:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
-                "WHERE ca.repo_id = $rid "
-                "RETURN ca.id, rc.callee_name, count(*) AS w",
-                {"rid": repo_id},
-            )
-            ext_rows = self._rows(r3, ["class_id", "callee_name", "weight"])
-            for row in ext_rows:
-                name = row["callee_name"] or "unknown"
-                ext_id = f"__ext__{name}"
-                if ext_id not in ext_nodes:
-                    ext_nodes[ext_id] = {
-                        "id": ext_id,
-                        "label": name,
-                        "fqn": f"[external] {name}",
-                        "kind": "external",
-                        "degree": 0,
-                    }
-                pair = (row["class_id"], ext_id)
-                if pair not in seen_ext:
-                    seen_ext.add(pair)
-                    ext_edges.append({"from": row["class_id"], "to": ext_id, "weight": row["weight"]})
-        except Exception:
-            pass  # old DB without callee_name — skip external nodes
-
-        nodes = [
-            {
+        for row in class_rows:
+            nodes.append({
                 "id": row["id"],
                 "label": row["name"],
                 "fqn": row["fqn"],
                 "kind": "interface" if row["is_interface"] else "class",
-                "degree": degree.get(row["id"], 0),
-            }
-            for row in class_rows
-        ] + list(ext_nodes.values())
+                "degree": class_degree.get(row["id"], 0),
+            })
 
-        edges = [
-            {"from": e["from"], "to": e["to"], "weight": e["weight"]}
-            for e in edge_rows if e["from"] != e["to"]  # skip self-loops
-        ] + ext_edges
-
-        return {"nodes": nodes, "edges": edges}
-
-    def _graph_method(self, repo_id: str) -> dict:
-        """Method-level graph: top 150 methods by call degree."""
-        r = self._conn.execute(
-            "MATCH (m:Method)-[:CALLS]->(:Method) WHERE m.repo_id = $rid "
-            "RETURN m.id, m.name, m.fqn, count(*) AS deg "
-            "ORDER BY deg DESC LIMIT 150",
+        # ── Methods ───────────────────────────────────────────────────────
+        r3 = self._conn.execute(
+            "MATCH (c:Class)-[:CONTAINS_METHOD]->(m:Method) WHERE c.repo_id = $rid "
+            "RETURN m.id, m.name, m.fqn, c.id AS class_id",
             {"rid": repo_id},
         )
-        rows = self._rows(r, ["id", "name", "fqn", "deg"])
-        # Include callee targets
-        node_ids = {row["id"] for row in rows}
-        for mid in list(node_ids):
-            r2 = self._conn.execute(
-                "MATCH (a:Method {id: $id})-[:CALLS]->(b:Method) WHERE b.repo_id = $rid RETURN b.id, b.name, b.fqn, 0",
-                {"id": mid, "rid": repo_id},
-            )
-            for row in self._rows(r2, ["id", "name", "fqn", "deg"]):
-                if row["id"] not in node_ids and len(rows) < 200:
-                    rows.append(row)
-                    node_ids.add(row["id"])
+        method_rows = self._rows(r3, ["id", "name", "fqn", "class_id"])
+        method_ids = {row["id"] for row in method_rows}
+        method_degree: dict[str, int] = {}
 
-        def _class(fqn: str) -> str:
+        # ── Method-to-method call edges ───────────────────────────────────
+        r4 = self._conn.execute(
+            "MATCH (ma:Method)-[:CALLS]->(mb:Method) "
+            "WHERE ma.repo_id = $rid AND mb.repo_id = $rid "
+            "RETURN ma.id, mb.id",
+            {"rid": repo_id},
+        )
+        seen_mm: set[tuple] = set()
+        while r4.has_next():
+            a, b = r4.get_next()
+            if (a, b) not in seen_mm:
+                seen_mm.add((a, b))
+                method_degree[a] = method_degree.get(a, 0) + 1
+                edges.append({"from": a, "to": b, "weight": 1, "etype": "method_call"})
+
+        def _class_label(fqn: str) -> str:
             parts = fqn.rsplit(".", 2)
             return parts[-2] if len(parts) >= 2 else fqn
 
-        nodes = [{"id": r["id"], "label": r["name"], "fqn": r["fqn"],
-                  "kind": "method", "degree": r["deg"], "group": _class(r["fqn"])} for r in rows]
+        for row in method_rows:
+            nodes.append({
+                "id": row["id"],
+                "label": row["name"],
+                "fqn": row["fqn"],
+                "kind": "method",
+                "degree": method_degree.get(row["id"], 0),
+                "parent_id": row["class_id"],
+                "group": _class_label(row["fqn"]),
+            })
 
-        edges = []
-        seen: set[tuple] = set()
-        for nid in list(node_ids):
-            r3 = self._conn.execute(
-                "MATCH (a:Method {id: $id})-[:CALLS]->(b:Method) RETURN b.id", {"id": nid}
-            )
-            while r3.has_next():
-                tid = r3.get_next()[0]
-                if tid in node_ids and (nid, tid) not in seen:
-                    seen.add((nid, tid))
-                    edges.append({"from": nid, "to": tid, "weight": 1})
-        return {"nodes": nodes, "edges": edges}
-
-    def _graph_dependency(self, repo_id: str) -> dict:
-        """Dependency graph: classes + external stub nodes only, no internal edges."""
-        r = self._conn.execute(
-            "MATCH (c:Class) WHERE c.repo_id = $rid RETURN c.id, c.name, c.fqn, c.is_interface",
-            {"rid": repo_id},
-        )
-        class_rows = self._rows(r, ["id", "name", "fqn", "is_interface"])
-
+        # ── External dependency stubs (UNRESOLVED_CALL) ───────────────────
         ext_nodes: dict[str, dict] = {}
-        ext_edges: list[dict] = []
-        seen: set[tuple] = set()
+        seen_ext: set[tuple] = set()
         try:
-            r2 = self._conn.execute(
+            r5 = self._conn.execute(
                 "MATCH (ca:Class)-[:CONTAINS_METHOD]->(ma:Method)-[:UNRESOLVED_CALL]->(rc:RestCall) "
                 "WHERE ca.repo_id = $rid "
                 "RETURN ca.id, rc.callee_name, count(*) AS w",
                 {"rid": repo_id},
             )
-            for row in self._rows(r2, ["class_id", "callee_name", "weight"]):
+            for row in self._rows(r5, ["class_id", "callee_name", "weight"]):
                 name = row["callee_name"] or "unknown"
                 ext_id = f"__ext__{name}"
                 if ext_id not in ext_nodes:
-                    ext_nodes[ext_id] = {"id": ext_id, "label": name,
-                                          "fqn": f"[external] {name}", "kind": "external", "degree": 0}
+                    ext_nodes[ext_id] = {
+                        "id": ext_id, "label": name,
+                        "fqn": f"[external] {name}", "kind": "external", "degree": 0,
+                    }
                 pair = (row["class_id"], ext_id)
-                if pair not in seen:
-                    seen.add(pair)
-                    ext_edges.append({"from": row["class_id"], "to": ext_id, "weight": row["weight"]})
+                if pair not in seen_ext:
+                    seen_ext.add(pair)
+                    edges.append({"from": row["class_id"], "to": ext_id, "weight": row["weight"], "etype": "ext_call"})
         except Exception:
-            pass
+            pass  # old DB without callee_name — skip
 
-        nodes = [{"id": r["id"], "label": r["name"], "fqn": r["fqn"],
-                  "kind": "interface" if r["is_interface"] else "class", "degree": 0}
-                 for r in class_rows] + list(ext_nodes.values())
-        return {"nodes": nodes, "edges": ext_edges}
+        nodes.extend(ext_nodes.values())
+        return {"nodes": nodes, "edges": edges}
 
     def endpoints(self) -> list[dict]:
         if self._conn is None:
@@ -807,38 +757,42 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
     return _html_page("Call Graph", f"""
 <h1>Call Graph</h1>
 
+<!-- Toolbar -->
 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px;">
   <select id="repoSelect" style="background:#1e2130;border:1px solid #2d3148;border-radius:8px;padding:8px 14px;color:#e2e8f0;font-size:0.9rem;outline:none;">
     {repo_options}
   </select>
 
+  <!-- View presets: control which kinds are visible, not which data is fetched -->
   <div style="display:flex;gap:0;border:1px solid #2d3148;border-radius:8px;overflow:hidden;">
-    <button class="view-btn active" data-view="class"      style="padding:7px 14px;font-size:0.82rem;background:#2d3148;color:#a5b4fc;border:none;cursor:pointer;font-weight:600;">Classes</button>
-    <button class="view-btn"        data-view="method"     style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Methods</button>
-    <button class="view-btn"        data-view="dependency" style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Dependencies</button>
+    <button class="view-btn active" data-view="all"        style="padding:7px 14px;font-size:0.82rem;background:#2d3148;color:#a5b4fc;border:none;cursor:pointer;font-weight:600;">All</button>
+    <button class="view-btn"        data-view="classes"    style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Classes</button>
+    <button class="view-btn"        data-view="methods"    style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Methods</button>
+    <button class="view-btn"        data-view="deps"       style="padding:7px 14px;font-size:0.82rem;background:#1e2130;color:#94a3b8;border:none;cursor:pointer;">Dependencies</button>
   </div>
 
+  <!-- Per-kind filter toggles — auto-populated after load, start all ON -->
   <div id="filterToggles" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;"></div>
 
-  <button id="loadBtn" class="btn" style="padding:7px 16px;font-size:0.88rem;">Load</button>
-  <button id="fitBtn"  style="padding:7px 12px;font-size:0.82rem;background:#1e2130;border:1px solid #2d3148;border-radius:8px;color:#94a3b8;cursor:pointer;" title="Fit graph to window">&#x26F6;</button>
+  <button id="fitBtn" style="padding:7px 12px;font-size:0.82rem;background:#1e2130;border:1px solid #2d3148;border-radius:8px;color:#94a3b8;cursor:pointer;" title="Fit graph to window">&#x26F6;</button>
   <span id="graphStatus" style="color:#64748b;font-size:0.8rem;margin-left:4px;"></span>
 </div>
 
 <div style="display:flex;gap:0;height:700px;">
   <div id="graph-container" style="flex:1;background:#0c0e14;border:1px solid #2d3148;border-radius:10px 0 0 10px;overflow:hidden;position:relative;">
-    <div id="graph-loading" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#475569;font-size:0.9rem;">Select a repo and click Load</div>
+    <div id="graph-loading" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#475569;font-size:0.9rem;">Loading…</div>
   </div>
   <div id="legend-panel" style="width:210px;background:#111318;border:1px solid #2d3148;border-left:none;border-radius:0 10px 10px 0;padding:16px 12px;overflow-y:auto;display:none;">
-    <div style="font-size:0.75rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;">Legend</div>
-    <div id="legend-items"></div>
-    <div style="margin-top:16px;font-size:0.72rem;color:#475569;">
-      <div style="margin-bottom:4px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#6366f1;margin-right:6px;vertical-align:middle;"></span>Class</div>
-      <div style="margin-bottom:4px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#94a3b8;margin-right:6px;vertical-align:middle;"></span>Interface</div>
-      <div style="margin-bottom:4px;"><span style="display:inline-block;width:10px;height:10px;background:#f59e0b;border-radius:50%;margin-right:6px;vertical-align:middle;"></span>Method</div>
-      <div><span style="display:inline-block;width:10px;height:10px;background:#ef4444;border-radius:2px;margin-right:6px;vertical-align:middle;opacity:.7;"></span>External dep</div>
+    <div style="font-size:0.75rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px;">Node Types</div>
+    <div style="font-size:0.72rem;color:#475569;line-height:2;">
+      <div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4f46e5;margin-right:6px;vertical-align:middle;border:1px solid #6366f1;"></span>Class</div>
+      <div><span style="display:inline-block;width:10px;height:10px;background:#1e3a5f;margin-right:6px;vertical-align:middle;border:1px solid #38bdf8;transform:rotate(45deg);"></span>Interface</div>
+      <div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#92400e;margin-right:6px;vertical-align:middle;border:1px solid #f59e0b;"></span>Method</div>
+      <div><span style="display:inline-block;width:10px;height:10px;background:#3b0a0a;margin-right:6px;vertical-align:middle;border:1px solid #ef4444;"></span>External dep</div>
     </div>
-    <div style="margin-top:16px;font-size:0.72rem;color:#475569;line-height:1.6;">
+    <div style="margin-top:14px;font-size:0.75rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px;">Packages</div>
+    <div id="legend-items"></div>
+    <div style="margin-top:14px;font-size:0.72rem;color:#475569;line-height:1.7;">
       Edge thickness = call count<br>
       Node size = out-degree<br>
       Click node → symbol detail
@@ -850,23 +804,25 @@ def _page_graph(db: _DB, repo_name: str = "") -> str:
 
 <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 <script>
-const container = document.getElementById('graph-container');
-const loading   = document.getElementById('graph-loading');
-const tooltip   = document.getElementById('tooltip');
-const status    = document.getElementById('graphStatus');
+const container   = document.getElementById('graph-container');
+const loadingDiv  = document.getElementById('graph-loading');
+const tooltip     = document.getElementById('tooltip');
+const status      = document.getElementById('graphStatus');
 const legendPanel = document.getElementById('legend-panel');
 const legendItems = document.getElementById('legend-items');
 
-let network = null;
-let currentView = 'class';
-let hiddenKinds = new Set();
+let network   = null;
+let visNodes  = null;
+let visEdges  = null;
+let rawData   = null;           // full payload from server
+let hiddenKinds = new Set();    // kinds toggled OFF by the user
 
-// Colours
+// ── Colour palette ────────────────────────────────────────────────────────
 const KIND_COLOR = {{
-  class:      {{ bg: '#4f46e5', border: '#6366f1' }},
-  interface:  {{ bg: '#1e3a5f', border: '#38bdf8' }},
-  method:     {{ bg: '#92400e', border: '#f59e0b' }},
-  external:   {{ bg: '#3b0a0a', border: '#ef4444' }},
+  class:     {{ bg: '#4f46e5', border: '#6366f1' }},
+  interface: {{ bg: '#1e3a5f', border: '#38bdf8' }},
+  method:    {{ bg: '#92400e', border: '#f59e0b' }},
+  external:  {{ bg: '#3b0a0a', border: '#ef4444' }},
 }};
 const palette = ['#6366f1','#22d3ee','#f59e0b','#34d399','#f87171','#a78bfa',
                  '#fb923c','#38bdf8','#4ade80','#e879f9','#facc15','#60a5fa',
@@ -878,62 +834,67 @@ function groupColor(g) {{
   return groupColors[g];
 }}
 
-// View toggle buttons
+// ── View presets ──────────────────────────────────────────────────────────
+const PRESET_KINDS = {{
+  all:     null,                              // null = show everything
+  classes: new Set(['class','interface','external']),
+  methods: new Set(['method']),
+  deps:    new Set(['class','interface','external']),
+}};
+
 document.querySelectorAll('.view-btn').forEach(btn => {{
   btn.onclick = () => {{
     document.querySelectorAll('.view-btn').forEach(b => {{
       b.style.background = '#1e2130'; b.style.color = '#94a3b8'; b.classList.remove('active');
     }});
     btn.style.background = '#2d3148'; btn.style.color = '#a5b4fc'; btn.classList.add('active');
-    currentView = btn.dataset.view;
+    applyPreset(btn.dataset.view);
   }};
 }});
 
-document.getElementById('loadBtn').onclick = loadGraph;
-document.getElementById('fitBtn').onclick  = () => network && network.fit({{ animation: true }});
-document.addEventListener('mousemove', e => {{
-  tooltip.style.left = (e.clientX + 16) + 'px';
-  tooltip.style.top  = (e.clientY - 8)  + 'px';
-}});
-
-function nodeVisuals(n) {{
-  const kind = n.kind || 'class';
-  const col  = KIND_COLOR[kind] || KIND_COLOR.class;
-  const isExt = kind === 'external';
-  const base  = Math.max(10, Math.min(32, 10 + (n.degree || 0)));
-  return {{
-    id:    n.id,
-    label: n.label,
-    title: n.fqn,
-    fqn:   n.fqn,
-    kind:  kind,
-    shape: kind === 'interface' ? 'diamond' : (kind === 'method' ? 'dot' : (isExt ? 'square' : 'dot')),
-    size:  isExt ? 10 : base,
-    color: {{
-      background: col.bg,
-      border:     col.border,
-      highlight:  {{ background: '#fff', border: '#6366f1' }},
-      hover:      {{ background: col.border, border: '#fff' }},
-    }},
-    font:   {{ color: isExt ? '#94a3b8' : '#f1f5f9', size: isExt ? 9 : 11 }},
-    hidden: hiddenKinds.has(kind),
-  }};
+function applyPreset(preset) {{
+  if (!rawData) return;
+  const allowed = PRESET_KINDS[preset];   // null = all, Set = whitelist
+  hiddenKinds.clear();
+  if (allowed) {{
+    rawData.nodes.forEach(n => {{ if (!allowed.has(n.kind)) hiddenKinds.add(n.kind); }});
+  }}
+  // Sync filter toggle buttons
+  document.querySelectorAll('[data-filter-kind]').forEach(btn => {{
+    const k = btn.dataset.filterKind;
+    const on = !hiddenKinds.has(k);
+    btn.style.opacity  = on ? '1' : '0.35';
+    btn.dataset.active = on ? '1' : '0';
+  }});
+  applyVisibility();
 }}
 
-function edgeVisuals(e, idx) {{
-  const w = e.weight || 1;
-  return {{
-    id:     idx,
-    from:   e.from,
-    to:     e.to,
-    arrows: {{ to: {{ enabled: true, scaleFactor: 0.45 }} }},
-    color:  {{ color: '#2d3148', highlight: '#818cf8', opacity: 0.75 }},
-    width:  Math.min(4, 0.8 + w * 0.25),
-    smooth: {{ type: 'curvedCW', roundness: 0.12 }},
-    title:  `${{w}} call${{w > 1 ? 's' : ''}}`,
-  }};
+// ── Visibility: hide/show nodes and edges that touch only hidden nodes ────
+function applyVisibility() {{
+  if (!visNodes || !visEdges) return;
+  const nodeUpdates = visNodes.getIds().map(id => {{
+    const n = visNodes.get(id);
+    return {{ id, hidden: hiddenKinds.has(n.kind) }};
+  }});
+  visNodes.update(nodeUpdates);
+
+  // Hide edges whose from or to node is hidden
+  const hiddenNodeIds = new Set(
+    visNodes.getIds().filter(id => visNodes.get(id).hidden)
+  );
+  const edgeUpdates = visEdges.getIds().map(id => {{
+    const e = visEdges.get(id);
+    return {{ id, hidden: hiddenNodeIds.has(e.from) || hiddenNodeIds.has(e.to) }};
+  }});
+  visEdges.update(edgeUpdates);
+
+  // Update status count
+  const visibleNodes = visNodes.getIds().filter(id => !visNodes.get(id).hidden).length;
+  const visibleEdges = visEdges.getIds().filter(id => !visEdges.get(id).hidden).length;
+  status.textContent = `${{visibleNodes}} nodes · ${{visibleEdges}} edges (of ${{rawData.nodes.length}} / ${{rawData.edges.length}})`;
 }}
 
+// ── Per-kind filter toggle buttons ────────────────────────────────────────
 function buildFilterToggles(kinds) {{
   const panel = document.getElementById('filterToggles');
   panel.innerHTML = '';
@@ -942,61 +903,107 @@ function buildFilterToggles(kinds) {{
     btn.textContent = kind.charAt(0).toUpperCase() + kind.slice(1) + 's';
     const col = (KIND_COLOR[kind] || KIND_COLOR.class).border;
     btn.style.cssText = `padding:4px 10px;font-size:0.78rem;border-radius:6px;border:1px solid ${{col}};`
-      + `background:transparent;color:${{col}};cursor:pointer;font-weight:600;`;
-    btn.dataset.kind = kind;
+      + `background:transparent;color:${{col}};cursor:pointer;font-weight:600;opacity:1;`;
+    btn.dataset.filterKind = kind;
+    btn.dataset.active = '1';
     btn.onclick = () => {{
-      if (hiddenKinds.has(kind)) {{
-        hiddenKinds.delete(kind);
-        btn.style.opacity = '1';
-      }} else {{
+      const on = btn.dataset.active === '1';
+      if (on) {{
         hiddenKinds.add(kind);
-        btn.style.opacity = '0.35';
+        btn.style.opacity  = '0.35';
+        btn.dataset.active = '0';
+      }} else {{
+        hiddenKinds.delete(kind);
+        btn.style.opacity  = '1';
+        btn.dataset.active = '1';
       }}
-      if (!network) return;
-      const ids = network.body.data.nodes.getIds();
-      const updates = ids.map(id => {{
-        const n = network.body.data.nodes.get(id);
-        return {{ id, hidden: hiddenKinds.has(n.kind) }};
+      // Deactivate view preset (custom state)
+      document.querySelectorAll('.view-btn').forEach(b => {{
+        b.style.background = '#1e2130'; b.style.color = '#94a3b8'; b.classList.remove('active');
       }});
-      network.body.data.nodes.update(updates);
+      applyVisibility();
     }};
     panel.appendChild(btn);
   }});
 }}
 
 function buildLegend(nodes) {{
-  // Group by package (first 3 segments of fqn)
   const groups = {{}};
   nodes.forEach(n => {{
     if (n.kind === 'external') return;
-    const parts = n.fqn.split('.');
+    const parts = (n.fqn || '').split('.');
     const pkg = parts.slice(0, Math.min(3, parts.length - 1)).join('.');
-    if (!groups[pkg]) groups[pkg] = groupColor(pkg);
+    if (pkg && !groups[pkg]) groups[pkg] = groupColor(pkg);
   }});
   legendItems.innerHTML = Object.entries(groups).map(([pkg, col]) =>
-    `<div style="display:flex;align-items:center;gap:7px;margin-bottom:6px;font-size:0.72rem;color:#94a3b8;">`
-    + `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${{col}};flex-shrink:0;"></span>`
+    `<div style="display:flex;align-items:center;gap:7px;margin-bottom:5px;font-size:0.7rem;color:#94a3b8;">`
+    + `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${{col}};flex-shrink:0;"></span>`
     + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${{pkg}}">${{pkg}}</span></div>`
   ).join('');
 }}
 
+// ── Node/edge visuals ─────────────────────────────────────────────────────
+function nodeVisual(n) {{
+  const kind = n.kind || 'class';
+  const col  = KIND_COLOR[kind] || KIND_COLOR.class;
+  const isExt = kind === 'external';
+  const size  = isExt ? 10 : Math.max(10, Math.min(32, 10 + (n.degree || 0)));
+  return {{
+    id:    n.id,
+    label: n.label,
+    fqn:   n.fqn,
+    kind,
+    shape: kind === 'interface' ? 'diamond' : (isExt ? 'square' : 'dot'),
+    size,
+    color: {{ background: col.bg, border: col.border,
+              highlight: {{ background: '#fff', border: '#6366f1' }},
+              hover:     {{ background: col.border, border: '#fff' }} }},
+    font:   {{ color: isExt ? '#94a3b8' : '#f1f5f9', size: isExt ? 9 : 11 }},
+    hidden: hiddenKinds.has(kind),
+    group:  n.group || '',
+  }};
+}}
+
+function edgeVisual(e, idx) {{
+  const w = e.weight || 1;
+  // Differentiate edge types visually
+  const edgeColor = e.etype === 'method_call' ? '#374151'
+                  : e.etype === 'ext_call'    ? '#4c0519'
+                  : '#2d3148';
+  return {{
+    id:     `e${{idx}}`,
+    from:   e.from,
+    to:     e.to,
+    etype:  e.etype,
+    arrows: {{ to: {{ enabled: true, scaleFactor: 0.45 }} }},
+    color:  {{ color: edgeColor, highlight: '#818cf8', opacity: 0.75 }},
+    width:  Math.min(4, 0.8 + w * 0.25),
+    smooth: {{ type: 'curvedCW', roundness: 0.12 }},
+    title:  `${{w}} call${{w > 1 ? 's' : ''}}`,
+    hidden: false,
+  }};
+}}
+
+// ── Load data ─────────────────────────────────────────────────────────────
 function loadGraph() {{
   const repo = document.getElementById('repoSelect').value;
   if (!repo) return;
-  loading.style.display = 'block';
-  loading.textContent = 'Loading…';
-  status.textContent = '';
+  loadingDiv.style.display = 'block';
+  loadingDiv.textContent   = 'Loading…';
+  status.textContent       = '';
   legendPanel.style.display = 'none';
-  if (network) {{ network.destroy(); network = null; }}
+  if (network) {{ network.destroy(); network = null; visNodes = null; visEdges = null; }}
   hiddenKinds.clear();
+  rawData = null;
 
-  fetch(`/api/graph?repo=${{encodeURIComponent(repo)}}&view=${{currentView}}`)
+  fetch(`/api/graph?repo=${{encodeURIComponent(repo)}}`)
     .then(r => r.json())
     .then(data => {{
-      loading.style.display = 'none';
+      rawData = data;
+      loadingDiv.style.display = 'none';
       if (!data.nodes.length) {{
-        loading.style.display = 'block';
-        loading.textContent = 'No data found for this repo / view.';
+        loadingDiv.style.display = 'block';
+        loadingDiv.textContent   = 'No data found for this repo.';
         return;
       }}
 
@@ -1005,8 +1012,8 @@ function loadGraph() {{
       buildLegend(data.nodes);
       legendPanel.style.display = 'block';
 
-      const visNodes = new vis.DataSet(data.nodes.map(nodeVisuals));
-      const visEdges = new vis.DataSet(data.edges.map(edgeVisuals));
+      visNodes = new vis.DataSet(data.nodes.map(nodeVisual));
+      visEdges = new vis.DataSet(data.edges.map(edgeVisual));
 
       network = new vis.Network(container, {{ nodes: visNodes, edges: visEdges }}, {{
         physics: {{
@@ -1019,10 +1026,10 @@ function loadGraph() {{
             springConstant: 0.04,
             damping: 0.6,
           }},
-          stabilization: {{ iterations: 250, updateInterval: 25 }},
+          stabilization: {{ iterations: 300, updateInterval: 25 }},
           maxVelocity: 80,
         }},
-        interaction: {{ hover: true, tooltipDelay: 100, navigationButtons: true, keyboard: true, multiselect: true }},
+        interaction: {{ hover: true, tooltipDelay: 80, navigationButtons: true, keyboard: true, multiselect: true }},
         layout:      {{ improvedLayout: false }},
       }});
 
@@ -1042,17 +1049,23 @@ function loadGraph() {{
         network.fit({{ animation: {{ duration: 400 }} }});
       }});
 
-      const extCount  = data.nodes.filter(n => n.kind === 'external').length;
-      const nodeCount = data.nodes.length;
-      status.textContent = `${{nodeCount}} nodes · ${{data.edges.length}} edges` +
-        (extCount ? ` · ${{extCount}} external deps` : '');
+      applyVisibility();
     }})
     .catch(err => {{
-      loading.style.display = 'block';
-      loading.textContent = 'Error: ' + err;
+      loadingDiv.style.display = 'block';
+      loadingDiv.textContent   = 'Error: ' + err;
     }});
 }}
 
+// ── Wiring ────────────────────────────────────────────────────────────────
+document.getElementById('repoSelect').onchange = loadGraph;
+document.getElementById('fitBtn').onclick = () => network && network.fit({{ animation: true }});
+document.addEventListener('mousemove', e => {{
+  tooltip.style.left = (e.clientX + 16) + 'px';
+  tooltip.style.top  = (e.clientY - 8)  + 'px';
+}});
+
+// Auto-load on page open
 if (document.getElementById('repoSelect').options.length) loadGraph();
 </script>
 """)
@@ -1124,8 +1137,7 @@ def _make_app(db: _DB, db_path: str):
     async def api_graph(request: Request):
         from starlette.responses import JSONResponse  # noqa: PLC0415
         repo_name = request.query_params.get("repo", "")
-        view = request.query_params.get("view", "class")
-        data = db.graph_data(repo_name, view=view)
+        data = db.graph_data(repo_name)
         return JSONResponse(data)
 
     async def index_get(request: Request) -> HTMLResponse:
