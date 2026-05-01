@@ -15,15 +15,32 @@ from orihime.indexer import index_repo
 _DEFAULT_DB_PATH = str(Path.home() / ".orihime" / "orihime.db")
 
 
-def _install_skills() -> None:
-    """Copy bundled Claude Code skills into ~/.claude/skills/."""
+def _install_skills(agent: str = "claude", repo_path: str | None = None) -> None:
+    """Install bundled skills for the specified AI coding assistant."""
     src_root = Path(__file__).parent / "skills"
-    dst_root = Path.home() / ".claude" / "skills"
-
     if not src_root.exists():
         print("ERROR: skills directory not found in the Orihime package.")
         sys.exit(1)
 
+    agents = ["claude", "cursor", "codex", "copilot"] if agent == "all" else [agent]
+
+    for ag in agents:
+        if ag == "claude":
+            _install_skills_claude(src_root)
+        elif ag == "cursor":
+            _install_skills_cursor(src_root)
+        elif ag == "codex":
+            _install_skills_codex(src_root)
+        elif ag == "copilot":
+            if not repo_path:
+                print("WARNING: --agent copilot requires --repo PATH. Skipping copilot.")
+                continue
+            _install_skills_copilot(src_root, Path(repo_path))
+
+
+def _install_skills_claude(src_root: Path) -> None:
+    """Install skills as ~/.claude/skills/<name>/SKILL.md (Claude Code format)."""
+    dst_root = Path.home() / ".claude" / "skills"
     dst_root.mkdir(parents=True, exist_ok=True)
     installed = []
     for skill_dir in sorted(src_root.iterdir()):
@@ -34,11 +51,95 @@ def _install_skills() -> None:
             shutil.rmtree(dst)
         shutil.copytree(skill_dir, dst)
         installed.append(skill_dir.name)
-
-    print(f"Installed {len(installed)} skill(s) to {dst_root}:")
+    print(f"[claude] Installed {len(installed)} skill(s) to {dst_root}:")
     for name in installed:
         print(f"  /{name}")
-    print("\nRestart Claude Code to activate.")
+    print("  → Restart Claude Code to activate.\n")
+
+
+def _install_skills_cursor(src_root: Path) -> None:
+    """Install skills as ~/.cursor/rules/<name>.mdc (Cursor format)."""
+    dst_root = Path.home() / ".cursor" / "rules"
+    dst_root.mkdir(parents=True, exist_ok=True)
+    installed = []
+    for skill_dir in sorted(src_root.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        content = skill_md.read_text()
+        # Extract name and description from frontmatter, convert to Cursor .mdc format
+        name = skill_dir.name
+        desc = ""
+        in_fm = False
+        for line in content.splitlines():
+            if line.strip() == "---":
+                in_fm = not in_fm
+                continue
+            if in_fm and line.startswith("description:"):
+                desc = line.split("description:", 1)[1].strip().strip(">").strip()
+        # Strip YAML frontmatter, keep markdown body
+        parts = content.split("---", 2)
+        body = parts[2].strip() if len(parts) >= 3 else content
+        mdc = f"---\ndescription: {desc}\nalwaysApply: false\n---\n\n{body}\n"
+        out = dst_root / f"{name}.mdc"
+        out.write_text(mdc)
+        installed.append(name)
+    print(f"[cursor] Installed {len(installed)} rule(s) to {dst_root}:")
+    for name in installed:
+        print(f"  {name}.mdc")
+    print("  → Restart Cursor to activate.\n")
+
+
+def _install_skills_codex(src_root: Path) -> None:
+    """Append skills to ~/AGENTS.md (Codex format)."""
+    agents_md = Path.home() / "AGENTS.md"
+    header = "\n\n## Orihime Code Graph Skills\n\nThe following skills use the Orihime MCP server (`mcp__orihime__*` tools).\n"
+    sections = [header]
+    for skill_dir in sorted(src_root.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        content = skill_md.read_text()
+        # Strip YAML frontmatter
+        parts = content.split("---", 2)
+        body = parts[2].strip() if len(parts) >= 3 else content
+        sections.append(f"\n---\n\n{body}\n")
+    block = "\n".join(sections)
+    # Remove any existing orihime block
+    existing = agents_md.read_text() if agents_md.exists() else ""
+    if "## Orihime Code Graph Skills" in existing:
+        existing = existing[:existing.index("## Orihime Code Graph Skills")].rstrip()
+    agents_md.write_text(existing + block)
+    print(f"[codex] Wrote Orihime skills to {agents_md}\n")
+
+
+def _install_skills_copilot(src_root: Path, repo: Path) -> None:
+    """Append skills to <repo>/.github/copilot-instructions.md (Copilot format)."""
+    gh_dir = repo / ".github"
+    gh_dir.mkdir(exist_ok=True)
+    instructions = gh_dir / "copilot-instructions.md"
+    header = "\n\n## Orihime Code Graph Skills\n\nUse `mcp__orihime__*` tools for code graph queries. Skills below define when and how.\n"
+    sections = [header]
+    for skill_dir in sorted(src_root.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        content = skill_md.read_text()
+        parts = content.split("---", 2)
+        body = parts[2].strip() if len(parts) >= 3 else content
+        sections.append(f"\n---\n\n{body}\n")
+    block = "\n".join(sections)
+    existing = instructions.read_text() if instructions.exists() else ""
+    if "## Orihime Code Graph Skills" in existing:
+        existing = existing[:existing.index("## Orihime Code Graph Skills")].rstrip()
+    instructions.write_text(existing + block)
+    print(f"[copilot] Wrote Orihime skills to {instructions}\n")
 
 
 def _register_mcp(db_path: str, python: str) -> None:
@@ -124,9 +225,20 @@ def main() -> None:
     )
 
     # ---- install-skills ----
-    subparsers.add_parser(
+    skills_parser = subparsers.add_parser(
         "install-skills",
-        help="Install Orihime Claude Code skills into ~/.claude/skills/",
+        help="Install Orihime skills for an AI coding assistant",
+    )
+    skills_parser.add_argument(
+        "--agent",
+        default="claude",
+        choices=["claude", "cursor", "codex", "copilot", "all"],
+        help="Target AI assistant (default: claude). 'all' installs for all agents except copilot.",
+    )
+    skills_parser.add_argument(
+        "--repo",
+        default=None,
+        help="Target repo path for copilot (required when --agent copilot or all)",
     )
 
     # ---- register ----
@@ -195,7 +307,7 @@ def main() -> None:
         return
 
     if args.command == "install-skills":
-        _install_skills()
+        _install_skills(agent=args.agent, repo_path=args.repo)
         return
 
     if args.command == "register":

@@ -3,7 +3,9 @@ name: orihime-perf-analysis
 description: >
   Use when the user asks "find performance hotspots", "which endpoints are at risk of saturation",
   "analyze capacity for repo X", "find N+1 queries", "what's the cascade risk if service X is slow",
-  "find I/O fanout", or wants to understand performance ceilings and structural complexity risks
+  "find I/O fanout", "here's my Gatling report", "I ran a performance test",
+  "analyze this JMeter result", "here's a simulation.log",
+  or wants to understand performance ceilings and structural complexity risks
   in a codebase. Uses Orihime MCP tools only — no source file reads.
 ---
 
@@ -24,13 +26,25 @@ description: >
 
 ---
 
-## Step 0 — Check if perf data has been ingested
+## Step 0 — Ingest perf data if provided
 
-Before running the full analysis, note whether perf data is available.
-`find_hotspots`, `estimate_capacity`, and `find_cascade_risk` return richer results
-when JMeter/Gatling perf data has been ingested. Without it, rankings are structural-only.
+If the user provides a file path (anything ending in `.log`, `.xml`, `.json`, or mentioning "simulation.log", "Gatling", "JMeter"):
 
-If no perf data: note at the end of the report:
+```
+mcp__orihime__ingest_perf_results(
+  repo_name="<repo>",
+  file_path="<the path the user gave>"
+)
+```
+
+Returns `{ingested, matched_methods, unmatched}`. Tell the user:
+- How many samples were ingested
+- How many matched methods in the graph
+- If `unmatched > 0`: "N samples couldn't be matched to indexed methods — make sure the repo is indexed and the endpoint FQNs in the perf file match what's in the graph"
+
+After ingestion, proceed with ALL remaining steps (1–6) immediately using the freshly ingested data. Do NOT stop after ingestion.
+
+If no file is provided: skip Step 0, proceed to Step 1 with whatever perf data was previously ingested (if any). Note at the end of the report if no perf data is available:
 > "No perf data ingested — hotspot ranking is structural only. To get p99-ranked hotspots,
 > run: `mcp__orihime__ingest_perf_results(repo_name='<repo>', file_path='/path/to/simulation.log')`"
 
@@ -133,18 +147,9 @@ Result keys: `upstream_method_fqn`, `downstream_endpoint`, `downstream_saturatio
 
 ---
 
-## Step 7 — Ingest perf data (if user wants to add it)
+## Step 7 — Ingest perf data
 
-```
-mcp__orihime__ingest_perf_results(
-  repo_name="<repo>",
-  file_path="/path/to/gatling/simulation.log"
-)
-```
-
-Supported formats: JMeter XML, Gatling `simulation.log`, simple JSON `{endpoint_fqn, p50_ms, p99_ms, rps}`.
-Returns: `{ingested, matched_methods, unmatched}`.
-After ingestion, re-run Steps 4–6 for ranked results.
+See Step 0 — ingest first, then analysis runs automatically.
 
 ---
 

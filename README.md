@@ -187,7 +187,7 @@ python -m orihime install-skills
 | `resolve` | Match RestCall URL patterns against Endpoints across all indexed repos |
 | `write-server` | Start the write-serialization server for team/server deployments |
 | `register` | Write the Orihime MCP server entry to `~/.claude/settings.json` |
-| `install-skills` | Copy bundled Claude Code skills to `~/.claude/skills/` |
+| `install-skills` | Copy bundled skills to the target AI assistant's config dir (`--agent claude\|cursor\|codex\|copilot\|all`) |
 
 ---
 
