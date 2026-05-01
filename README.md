@@ -93,7 +93,7 @@ No source file reads. No grep. Claude uses the graph directly — typically 5–
 | Cross-service cascade risk | ✓ | ✗ | ✗ | ✗ | ✗ |
 | License compliance | ✓ | ✗ | ✗ | ✗ | ✓³ |
 | Embedded DB (no server daemon) | ✓ | ✓ | ✗ | ✗ | ✗ |
-| Indexes Java / Kotlin | ✓ | ✗ | ✓ | ✓ | ✓ |
+| Indexes Java / Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Indexes JS / TS | ✓ | ✓ | ✓ | ✓ | ✓ |
 | License | MIT | PolyForm NC | LGPL | Commercial | Commercial |
 
@@ -101,7 +101,7 @@ No source file reads. No grep. Claude uses the graph directly — typically 5–
 > ² Custom taint sources/sinks require the Advanced Security add-on (Enterprise+).
 > ³ License compliance (SBOM + policy enforcement) requires the Advanced Security add-on (Enterprise+).
 >
-> **GitNexus** (PolyForm Non-Commercial) provides cross-repo call graphs and MCP integration but indexes only JavaScript/TypeScript. It does not cover Java/Kotlin codebases, SAST, or perf analysis.
+> **GitNexus** (PolyForm Non-Commercial) provides cross-repo call graphs and MCP integration across 14 languages including Java and Kotlin. It does not cover SAST, perf analysis, or compliance reporting.
 
 ---
 
@@ -334,7 +334,7 @@ Measured on a real 928-file Java/Kotlin service, tracing one controller endpoint
 | Approach | Wall time | Tool calls | Tokens | Files read |
 |---|---|---|---|---|
 | **Baseline** — Claude reads source files directly | ~4–5 min | 36 | ~84,000 | 27 |
-| **GitNexus** | cannot index Java/Kotlin | — | — | — |
+| **GitNexus** | not measured on this codebase | — | — | — |
 | **Orihime** | **~4 sec** | **7** | **~8,000** | **0** |
 
 **Orihime vs baseline: 98% fewer tokens · 80% fewer tool calls · 60× faster**
@@ -345,7 +345,7 @@ The 7 Orihime tool calls produced ~80% of the structural picture (full controlle
 
 #### JS/TS codebase — architecture comparison
 
-GitNexus supports JavaScript/TypeScript only. A direct JS/TS benchmark has not been run yet; the numbers below are **not measured** and will be filled in once benchmarked. What the architecture implies:
+A direct JS/TS benchmark has not been run yet; the numbers below are **not measured** and will be filled in once benchmarked. What the architecture implies:
 
 | Approach | Tool calls (est.) | Scope |
 |---|---|---|
