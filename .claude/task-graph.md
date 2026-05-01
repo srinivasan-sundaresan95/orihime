@@ -86,7 +86,7 @@ def registered_extensions() -> dict[str, str]:   # ext → lang
 | T16 | MCP 4.1 | Dual connection (local+server, KUZU_*) | 4.1.1–4.1.5 |
 | T5 | MCP 4.2 | 9 query tools (find_callers … list_unresolved) | 4.2.1–4.2.9 |
 | T6 | MCP 4.3 | Error handling + Claude Code registration | 4.3.1–4.3.4 |
-| T7 | MOSS | Similarity check vs GitNexus, fix if >20% | 6.1–6.8 |
+| T7 | MOSS | Similarity check vs reference implementations, fix if >20% | 6.1–6.8 |
 | T8 | Benefit | Token baseline: plain Claude, 5 questions | 16.1–16.7 |
 | T9 | Benefit | Token with Orihime: same 5 questions via MCP | 17.1–17.5 |
 | T10 | Benefit | Accuracy comparison + hallucination examples | 18.1–18.5 |
@@ -223,8 +223,8 @@ def registered_extensions() -> dict[str, str]:   # ext → lang
 
 ### T7 MOSS (6.1–6.8)
 6.1 install MOSS client
-6.2 collect GitNexus .js/.ts into /tmp/gitnexus_src/
-6.3 submit Orihime .py vs GitNexus via MOSS
+6.2 collect reference implementation sources into /tmp/ref_src/
+6.3 submit Orihime .py vs reference sources via MOSS
 6.4 review report; record similarity % per pair
 6.5 flag pairs >20%
 6.6 rewrite flagged segments

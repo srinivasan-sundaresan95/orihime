@@ -295,24 +295,22 @@ Batch write speedup vs naive per-row writes: **12×** (G5 Fix-A).
 
 ## Feature Comparison
 
-| Capability | Orihime | GitNexus | SonarQube Community | SonarQube Enterprise |
-|---|---|---|---|---|
-| Cross-file taint (SAST) | ✓ | ✗ | ✓ | ✓ |
-| Custom sources/sinks | ✓ (YAML) | ✗ | ✗ | ✓ |
-| Second-order injection | ✓ | ✗ | ✗ | ✗ |
-| OWASP/CWE/PCI/STIG reports | ✓ | ✗ | ✗ | ✓ |
-| Entry-point reachability filter | ✓ | ✗ | ✗ | ✗ |
-| Complexity hints (O(n²), N+1) | ✓ | ✗ | partial | partial |
-| Perf ingestion + capacity model | ✓ | ✗ | ✗ | ✗ |
-| Cross-repo call graph | ✓ | ✓ | ✗ | ✗ |
-| REST endpoint resolution | ✓ | ✓ | ✗ | ✗ |
-| License compliance | ✓ | ✗ | ✗ | ✓ |
-| Argument-level taint (G2) | ✓ | ✗ | ✗ | ✗ |
-| MCP integration (Claude) | ✓ | ✗ | ✗ | ✗ |
-| Embedded DB (no server daemon) | ✓ | ✓ | N/A | N/A |
-| License | MIT | PolyForm NC | LGPL | Commercial |
-
-> GitNexus's PolyForm Non-Commercial license prohibits commercial use. Orihime is MIT-licensed and unrestricted.
+| Capability | Orihime | SonarQube Community | SonarQube Enterprise |
+|---|---|---|---|
+| Cross-file taint (SAST) | ✓ | ✓ | ✓ |
+| Custom sources/sinks | ✓ (YAML) | ✗ | ✓ |
+| Second-order injection | ✓ | ✗ | ✗ |
+| OWASP/CWE/PCI/STIG reports | ✓ | ✗ | ✓ |
+| Entry-point reachability filter | ✓ | ✗ | ✗ |
+| Complexity hints (O(n²), N+1) | ✓ | partial | partial |
+| Perf ingestion + capacity model | ✓ | ✗ | ✗ |
+| Cross-repo call graph | ✓ | ✗ | ✗ |
+| REST endpoint resolution | ✓ | ✗ | ✗ |
+| License compliance | ✓ | ✗ | ✓ |
+| Argument-level taint (G2) | ✓ | ✗ | ✗ |
+| MCP integration (Claude) | ✓ | ✗ | ✗ |
+| Embedded DB (no server daemon) | ✓ | N/A | N/A |
+| License | MIT | LGPL | Commercial |
 
 ---
 

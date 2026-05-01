@@ -17,6 +17,18 @@ Orihime closes ~70% of Aikido's advantage over SonarQube Community within a stat
 
 ---
 
+### A1 — Claude Code Agent Skills for Orihime MCP (~4h, DONE)
+
+Four global Claude Code skills installed in `~/.claude/skills/`:
+- `orihime-call-flow` — trace controller→service→repo→upstream chains via MCP
+- `orihime-security-audit` — OWASP taint audit with S8 reachability filtering
+- `orihime-perf-analysis` — hotspots, capacity estimation, cascade risk
+- `orihime-change-impact` — blast radius + test surface for any code change
+
+Skills use MCP tools only (no source file reads). Target: 5–8 tool calls per task vs 36 for source-only analysis.
+
+---
+
 ### S8 — Entry-Point Reachability Filtering (~80h)
 
 **What**: Today S4–S7 report every taint path that exists structurally in the code, including paths through dead code and internal-only utilities that are never called from a real entry point. S8 suppresses those false positives.
