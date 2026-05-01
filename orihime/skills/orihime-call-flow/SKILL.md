@@ -36,15 +36,24 @@ mcp__orihime__list_repos()
 Match the user's repo name. If not listed, stop and tell the user to run:
 `python -m orihime index --repo <path> --name <name>`
 
+If the user mentions a specific branch, also call:
+```
+mcp__orihime__list_branches(repo_name="<repo>")
+```
+Confirm the branch appears in the result before querying — Orihime stores files per branch, so an un-indexed branch returns empty results.
+
 ---
 
 ## Step 1 — Locate the entry point
 
 **If the user gave a URL path** (e.g. `/v5/point_card`):
 ```
-mcp__orihime__list_endpoints(repo_name="<repo>")
+mcp__orihime__find_endpoint_callers(
+  http_method="GET",   # or whatever the user specified
+  path_pattern="/v5/point_card"
+)
 ```
-Find the matching row — it has `http_method`, `path`, `handler_fqn`. Use `handler_fqn` for the next step.
+Returns `[{role, fqn, file_path, line_start}]`. The `role="handler"` entry is the controller method; `role="caller"` entries are its upstream callers. Use the handler's `fqn` for Step 2.
 
 **If the user gave a method name** (e.g. `getPointCardInfo`):
 ```
@@ -155,8 +164,8 @@ If `search_symbol` returns multiple matches with the same short name, use the fu
 ### search_symbol returns both classes and methods
 The result has a `type` field: `"class"` or `"method"`. Always use the `"method"` type result's FQN for `find_callers`/`find_callees`.
 
-### Endpoint handler_fqn from list_endpoints
-`list_endpoints` returns `handler_fqn` directly — no need to call `search_symbol` if the user gave a URL. Use `handler_fqn` straight into `find_callees`.
+### find_endpoint_callers vs search_symbol
+Use `find_endpoint_callers` when the user supplies an HTTP method + path. Use `search_symbol` when the user supplies a method name. `find_endpoint_callers` already returns the handler and its callers in one call; feed the handler `fqn` into `find_callees` to trace downstream.
 
 ### Do NOT read source files
 This skill uses MCP tools only. Do not call Read/Bash to open `.kt`, `.java` files.

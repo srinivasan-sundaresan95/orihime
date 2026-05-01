@@ -62,6 +62,24 @@ BFS of reverse CALLS edges. Result has a `depth` field:
 
 ---
 
+## Step 3b — External API boundary check
+
+```
+mcp__orihime__find_external_calls(repo_name="<repo>")
+```
+
+Result keys: `caller_fqn`, `callee_name`, `call_count` (sorted descending by call_count).
+
+Interpret the results in two directions:
+
+1. **The changed method is a caller of external libs** — if the method's class appears as a `caller_fqn` prefix, note that it makes N external library calls. Those targets are opaque to the graph and will NOT appear in the blast radius — callers inside the repo still show up normally, but any contracts with external libs must be verified manually.
+
+2. **The changed method is called from an unindexed repo** — look for entries where `callee_name` matches the method being changed. If found, this signals the method is part of a **public API boundary**: its callers live in a repo that is not indexed. Signature changes have wider impact than the graph can show. Flag this explicitly in the findings.
+
+3. **High call_count to a specific external service** (e.g. `RestTemplate.exchange`, `WebClient.get`) — the class is a gateway/adapter. Other repos that depend on its contract must be considered even if they're not in the graph.
+
+---
+
 ## Step 4 — Downstream implementors (for interface/abstract class changes)
 
 If the target is an interface or abstract class:
@@ -164,3 +182,6 @@ The graph gives you the exact file paths and line numbers — use them.
 
 ### Do NOT read source files proactively
 Only read source files in Step 7 and only when the user explicitly needs to see the code.
+
+### find_external_calls direction
+`find_external_calls` shows calls OUT of the repo (to unindexed libs/services). It does NOT show calls IN from other repos — for that, index the other repos first, then use `find_callers`.

@@ -60,6 +60,15 @@ mcp__orihime__find_taint_sinks(repo_name="<repo>")
 mcp__orihime__find_taint_flows(repo_name="<repo>")
 ```
 
+> **Limitation**: single-hop only — finds source-annotated methods that
+> directly call a sink (caller_arg_pos=0). Misses handler → service → sink
+> patterns (depth 2+) and taint passed as second+ argument.
+>
+> **Workaround for deeper paths**: use `find_reachable_sinks` to identify all
+> sink-reachable methods from entry points, then call
+> `find_callers(sink_method_fqn)` iteratively to trace backward toward the
+> entry point. This reconstructs the path manually hop by hop.
+
 Returns only findings where a tainted argument (@RequestParam/@RequestBody/@PathVariable)
 flows directly into a known sink's first parameter via a CALLS edge.
 This is stricter than find_reachable_sinks — fewer results, higher confidence.
@@ -84,6 +93,11 @@ Higher severity because they bypass per-service input validation.
 ```
 mcp__orihime__find_second_order_injection(repo_name="<repo>")
 ```
+
+> ⚠️ **Manual review required** — second-order findings are structural
+> approximations: a write method and read method in the same class are assumed
+> to share a tainted entity. Each finding must be manually verified to confirm
+> a real taint path exists before treating it as a confirmed vulnerability.
 
 Detects patterns where user-controlled data is stored to DB (save/persist/merge)
 and then read back and used as a sink (query/execute). This is a structural
@@ -187,6 +201,21 @@ zero (which may mean the S8 pass hasn't run for this repo — re-index to fix).
 ### find_taint_flows is NOT a superset of find_reachable_sinks
 `find_taint_flows` is stricter: it only catches arg-pos=0 flows. It can miss injection
 paths where the tainted value is passed as the second argument. Always run both.
+
+### find_second_order_injection is not value-flow
+The tool detects write-then-read patterns within the same class by method name
+heuristics (save/persist → findById/findAll in the same class). It does NOT
+trace actual data flow. Expect 30–50% false positive rate on typical Java
+Spring codebases. Use it to generate a shortlist for manual review, not as a
+scanner output.
+
+### find_taint_flows vs find_reachable_sinks — use both
+find_taint_flows: confirmed value-flow (source annotation → direct sink call),
+low false positives, misses depth 2+ paths.
+find_reachable_sinks: reachability only (entry point → any sink via call graph),
+higher coverage, no call chain returned, no sanitizer awareness.
+For a thorough audit: run both. Findings in find_reachable_sinks but not in
+find_taint_flows are candidates for manual taint tracing.
 
 ### Do NOT read source files
 This skill uses MCP tools only. All findings are in the graph.

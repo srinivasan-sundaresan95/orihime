@@ -120,7 +120,7 @@ mcp__orihime__estimate_capacity(repo_name="<repo>")
 ```
 
 For each endpoint with perf data:
-`saturation_rps = thread_pool_size (200) / (p99_ms / 1000)`
+`saturation_rps = thread_pool_size / (p99_ms / 1000)`
 
 Risk levels:
 - `CRITICAL` — current_rps > 80% of saturation
@@ -128,7 +128,22 @@ Risk levels:
 - `MEDIUM` — > 40%
 - `LOW` — otherwise
 
-Result keys: `endpoint_fqn`, `current_rps`, `p99_ms`, `saturation_rps`, `ceiling_concurrency`, `risk_level`
+Result keys: `endpoint_fqn`, `current_rps`, `p99_ms`, `saturation_rps`, `ceiling_concurrency`, `risk_level`, `thread_pool_size`
+
+If `estimate_capacity` returns an empty list:
+> No perf data available for capacity estimation.
+> Run `ingest_perf_results(repo_name, '/path/to/simulation.log')` first.
+>
+> **Structural alternative (no perf data needed)**: cross-reference
+> `find_complexity_hints` (call_degree × hint_weight) with `find_io_fanout`
+> (serial I/O count) to identify structural choke-points. Methods with high
+> call_degree + O(n²) hint + 3+ serial I/O are the highest saturation risk
+> candidates even without measured latency.
+
+If results are returned, note the `thread_pool_size` field — if it says 200,
+the default Tomcat value was used (no config file found). If it shows a
+different value, the actual `server.tomcat.threads.max` (or equivalent) was
+read from the repo's `application.properties` / `application.yml`.
 
 ---
 

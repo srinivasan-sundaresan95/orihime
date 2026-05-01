@@ -125,7 +125,7 @@ No source file reads. No grep. Claude uses the graph directly — typically 5–
 
 | Tool | Description |
 |---|---|
-| `list_entity_relations(repo_name)` | All JPA entity relationships |
+| `list_entity_relations(repo_name)` | All JPA entity relationships — also used in design review (Phase 1.5) |
 | `find_eager_fetches(repo_name)` | EAGER-fetched collections (N+1 risk) |
 
 ### Security (SAST)

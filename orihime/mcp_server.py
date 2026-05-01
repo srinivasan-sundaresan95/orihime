@@ -2050,6 +2050,96 @@ def find_hotspots(repo_name: str) -> list[dict]:
 _THREAD_POOL_SIZE = 200  # Spring Boot Tomcat default
 
 
+def _read_thread_pool_size(root_path: str) -> int:
+    """Read the actual thread pool size from the repo's Spring Boot config files.
+
+    Checks (in priority order):
+      1. src/main/resources/application.properties
+      2. src/main/resources/application.yml
+      3. src/main/resources/application.yaml
+
+    Keys checked (first match wins):
+      - server.tomcat.threads.max
+      - server.undertow.threads.worker
+      - server.netty.worker-count
+      - spring.task.execution.pool.max-size
+
+    Returns _THREAD_POOL_SIZE (200) if no config file exists, the key is
+    absent, the value cannot be parsed as int, or any error occurs.
+    """
+    if not root_path:
+        return _THREAD_POOL_SIZE
+
+    # --- .properties file ---
+    try:
+        props_path = root_path.rstrip("/\\") + "/src/main/resources/application.properties"
+        import os as _os  # noqa: PLC0415
+        if _os.path.isfile(props_path):
+            _PROPS_KEYS = [
+                "server.tomcat.threads.max",
+                "server.undertow.threads.worker",
+                "server.netty.worker-count",
+                "spring.task.execution.pool.max-size",
+            ]
+            props: dict[str, str] = {}
+            with open(props_path, encoding="utf-8") as _fh:
+                for line in _fh:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        props[k.strip()] = v.strip()
+            for key in _PROPS_KEYS:
+                if key in props:
+                    try:
+                        return int(props[key])
+                    except (ValueError, TypeError):
+                        continue
+    except Exception:
+        pass
+
+    # --- .yml / .yaml files ---
+    try:
+        import yaml as _yaml  # noqa: PLC0415
+    except ImportError:
+        return _THREAD_POOL_SIZE
+
+    _YAML_KEY_PATHS = [
+        # (dotted key, nested access lambda)
+        ("server.tomcat.threads.max",
+         lambda d: (d.get("server") or {}).get("tomcat", {}).get("threads", {}).get("max")),
+        ("server.undertow.threads.worker",
+         lambda d: (d.get("server") or {}).get("undertow", {}).get("threads", {}).get("worker")),
+        ("server.netty.worker-count",
+         lambda d: (d.get("server") or {}).get("netty", {}).get("worker-count")),
+        ("spring.task.execution.pool.max-size",
+         lambda d: ((d.get("spring") or {}).get("task") or {})
+                   .get("execution", {}).get("pool", {}).get("max-size")),
+    ]
+
+    for yml_name in ("application.yml", "application.yaml"):
+        try:
+            yml_path = root_path.rstrip("/\\") + "/src/main/resources/" + yml_name
+            if not _os.path.isfile(yml_path):
+                continue
+            with open(yml_path, encoding="utf-8") as _fh:
+                data = _yaml.safe_load(_fh)
+            if not isinstance(data, dict):
+                continue
+            for _key, accessor in _YAML_KEY_PATHS:
+                try:
+                    val = accessor(data)
+                    if val is not None:
+                        return int(val)
+                except (ValueError, TypeError, AttributeError):
+                    continue
+        except Exception:
+            continue
+
+    return _THREAD_POOL_SIZE
+
+
 @mcp.tool()
 def estimate_capacity(repo_name: str) -> list[dict]:
     """Estimate capacity per endpoint using Little's Law.
@@ -2082,6 +2172,13 @@ def estimate_capacity(repo_name: str) -> list[dict]:
             return []
         repo_id = r.get_next()[0]
 
+        r_root = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.id = $rid RETURN repo.root_path",
+            {"rid": repo_id},
+        )
+        root_path = r_root.get_next()[0] if r_root.has_next() else ""
+        thread_pool_size = _read_thread_pool_size(root_path)
+
         r_ps = conn.execute(
             "MATCH (ps:PerfSample) WHERE ps.repo_id = $rid "
             "RETURN ps.endpoint_fqn, ps.rps, ps.p99_ms",
@@ -2096,7 +2193,7 @@ def estimate_capacity(repo_name: str) -> list[dict]:
             if p99_ms is None or p99_ms <= 0:
                 continue
             p99_s = p99_ms / 1000.0
-            saturation_rps = _THREAD_POOL_SIZE / p99_s
+            saturation_rps = thread_pool_size / p99_s
             ceiling_concurrency = current_rps * p99_s
             ratio = current_rps / saturation_rps if saturation_rps > 0 else 0.0
             if ratio > 0.8:
@@ -2114,6 +2211,7 @@ def estimate_capacity(repo_name: str) -> list[dict]:
                 "saturation_rps": saturation_rps,
                 "ceiling_concurrency": ceiling_concurrency,
                 "risk_level": risk_level,
+                "thread_pool_size": thread_pool_size,
             })
 
         results.sort(key=lambda x: x["current_rps"] / x["saturation_rps"] if x["saturation_rps"] > 0 else 0, reverse=True)

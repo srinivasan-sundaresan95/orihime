@@ -141,7 +141,30 @@ Methods with 4+ I/O calls are orchestrators. Review whether:
 
 ---
 
-### 1.5 — Check for cross-service coupling smells
+### 1.5 — ORM data model (JPA entity relationships)
+
+```
+mcp__orihime__list_entity_relations(repo_name="<repo>")
+```
+
+Interpret results using this signal table:
+
+| Relationships on one class | Signal |
+|---|---|
+| 0–2 | Fine — focused domain object |
+| 3–4 | Note — review fetch strategies |
+| 5+ | Flag — candidate for decomposition into separate Aggregates |
+| Any `@ManyToMany` | Flag — hidden join table, often missing owning-side discipline |
+| `@OneToMany` with `fetch_type=EAGER` | Flag — guaranteed N+1 (also caught by `find_eager_fetches`) |
+
+Map to findings:
+- Class with 5+ relations → SPLIT finding (decompose into separate Aggregates)
+- `@OneToMany EAGER` without `@BatchSize` / `@EntityGraph` → APPLY finding (add batch fetching strategy)
+- `@ManyToMany` where both sides are `EAGER` → MISAPPLIED (dangerous combination)
+
+---
+
+### 1.6 — Check for cross-service coupling smells
 
 ```
 mcp__orihime__find_repo_dependencies(repo_name="<repo>")
@@ -252,6 +275,13 @@ For each finding, classify as one of:
 
 ---
 
+### ORM Data Model
+| Class | Relationship count | Notable relations |
+|---|---|---|
+| OrderEntity | 6 | 3× OneToMany (2 EAGER), 1× ManyToMany |
+
+---
+
 ### Findings
 
 #### [ClassName] — [Severity: SPLIT / FORTIFY / APPLY / MISAPPLIED]
@@ -307,3 +337,9 @@ Don't flag "this class has 15 methods" as SRP without checking what they actuall
 ### Read source files only after the graph tells you where to look
 Phase 1 graph analysis takes ~5 tool calls and identifies the 2–3 classes that warrant deep
 review. Don't read source files speculatively — the graph will tell you which ones matter.
+
+### list_entity_relations returns declared relationships only
+It does not tell you whether fetch strategies are overridden in JPQL queries
+(e.g. `JOIN FETCH`). A class showing LAZY can still trigger N+1 if callers use
+open-session-in-view or call getters outside a transaction. Use find_eager_fetches
+in parallel to cross-reference — it specifically flags EAGER collections.

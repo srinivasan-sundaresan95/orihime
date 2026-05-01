@@ -76,6 +76,20 @@ python -m orihime index --repo <path> --name <short-name>
 Derive `short-name` from the last directory component of the path.
 Example: `/home/user/projects/order-service` → `order-service`
 
+**OR — if already in an MCP session** (i.e. you can call mcp__orihime__* tools),
+use the tool directly instead of the CLI:
+
+```
+mcp__orihime__index_repo_tool(
+  repo_path="/absolute/path/to/repo",
+  repo_name="my-service",
+  branch="master"
+)
+```
+
+Returns a summary dict: `{repos, files, classes, methods, endpoints, rest_calls, call_edges}`.
+After indexing, all query tools reflect the new data immediately.
+
 After all repos are indexed:
 ```bash
 python -m orihime resolve
@@ -93,6 +107,19 @@ If Orihime is already installed (Step 0 detected existing repos):
 python -m orihime index --repo <new_path> --name <name>
 python -m orihime resolve
 ```
+
+**OR — if already in an MCP session**, use the tool directly instead of the CLI:
+
+```
+mcp__orihime__index_repo_tool(
+  repo_path="/absolute/path/to/repo",
+  repo_name="my-service",
+  branch="master"
+)
+```
+
+Returns a summary dict: `{repos, files, classes, methods, endpoints, rest_calls, call_edges}`.
+After indexing, all query tools reflect the new data immediately.
 
 Then verify with:
 ```
