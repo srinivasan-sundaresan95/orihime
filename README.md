@@ -92,7 +92,7 @@ No source file reads. No grep. Claude uses the graph directly — typically 5–
 | Perf ingestion + capacity model | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Cross-service cascade risk | ✓ | ✗ | ✗ | ✗ | ✗ |
 | License compliance | ✓ | ✗ | ✗ | ✗ | ✓³ |
-| Embedded DB (no server daemon) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Embedded DB (no server daemon) | ✓ | ✓ | ✗ | ✗ | ✗ |
 | Indexes Java / Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Indexes JS / TS | ✓ | ✓ | ✓ | ✓ | ✓ |
 | License | MIT | PolyForm NC | LGPL | Commercial | Commercial |
