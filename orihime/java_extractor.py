@@ -111,7 +111,12 @@ def _extract_annotation_info(
                     val_nodes = [
                         c
                         for c in pair_children
-                        if c.type in ("string_literal", "array_initializer", "field_access")
+                        if c.type in (
+                            "string_literal",
+                            "array_initializer",
+                            "element_value_array_initializer",
+                            "field_access",
+                        )
                     ]
                     if key_nodes and key_nodes[0].is_named:
                         key_text = _text(key_nodes[0], source_bytes)
@@ -119,6 +124,16 @@ def _extract_annotation_info(
                             val_node = val_nodes[0]
                             if val_node.type == "field_access":
                                 value = _resolve_field_access(val_node)
+                            elif val_node.type in (
+                                "array_initializer",
+                                "element_value_array_initializer",
+                            ):
+                                # @GetMapping(value = {"/path"}) — find first string_literal inside
+                                first_str = _find_first_child_of_type(val_node, "string_literal")
+                                if first_str:
+                                    frag = _find_first_child_of_type(first_str, "string_fragment")
+                                    if frag:
+                                        value = _text(frag, source_bytes)
                             else:
                                 frag = _find_first_child_of_type(
                                     val_node, "string_fragment"

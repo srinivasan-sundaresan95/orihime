@@ -96,22 +96,50 @@ def _collect_annotations(modifiers_node, src: bytes) -> list[str]:
     return result
 
 
+def _string_literal_text(node, src: bytes) -> str:
+    """Extract string content from a string_literal node."""
+    parts = []
+    for sc in node.children:
+        if sc.type == "string_content":
+            parts.append(_node_text(sc, src))
+    return "".join(parts)
+
+
 def _annotation_arg(annotation_node, src: bytes) -> str | None:
-    """Return the first string literal argument of an annotation, if any."""
+    """Return the first string literal argument of an annotation, if any.
+
+    Handles three forms:
+    1. @GetMapping("/path")                   — positional string_literal
+    2. @GetMapping(value = ["/path"])          — named arg with collection_literal
+    3. @GetMapping(path = ["/path"])           — named arg with collection_literal
+    """
     for child in annotation_node.children:
         if child.type == "constructor_invocation":
             val_args = _child_by_type(child, "value_arguments")
             if val_args:
                 for va in val_args.children:
-                    if va.type == "value_argument":
-                        for vac in va.children:
-                            if vac.type == "string_literal":
-                                # Extract content between quotes
-                                parts = []
-                                for sc in vac.children:
-                                    if sc.type == "string_content":
-                                        parts.append(_node_text(sc, src))
-                                return "".join(parts)
+                    if va.type != "value_argument":
+                        continue
+                    # Check for named argument: value_argument may contain a
+                    # simple_identifier label ("value" or "path") followed by "="
+                    # and then an expression.  Walk children to detect this.
+                    label: str | None = None
+                    expr_node = None
+                    for vac in va.children:
+                        if vac.type == "simple_identifier" and label is None:
+                            label = _node_text(vac, src)
+                        elif vac.type == "string_literal":
+                            # Positional or unlabelled string arg
+                            return _string_literal_text(vac, src)
+                        elif vac.type == "collection_literal":
+                            expr_node = vac
+                    # If we found a collection_literal, extract first string from it
+                    if expr_node is not None and expr_node.type == "collection_literal":
+                        # Only use it if unnamed or named with value/path
+                        if label is None or label in ("value", "path"):
+                            for cl_child in expr_node.children:
+                                if cl_child.type == "string_literal":
+                                    return _string_literal_text(cl_child, src)
     return None
 
 
