@@ -14,7 +14,7 @@ import tempfile
 import kuzu
 import pytest
 
-from dedalus.indexer import index_repo
+from orihime.indexer import index_repo
 
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"
 
@@ -122,7 +122,7 @@ def test_call_with_args_has_zero_position(g2_conn):
 
 def test_find_taint_flows_returns_list(g2_db, monkeypatch):
     """find_taint_flows must return a list (possibly empty for fixtures without taint-source annotations)."""
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     db = kuzu.Database(str(g2_db))
     conn = kuzu.Connection(db)
     monkeypatch.setattr(mcp_mod, "_conn", conn)
@@ -152,7 +152,7 @@ def test_find_taint_flows_returns_list(g2_db, monkeypatch):
 
 def test_find_taint_sinks_includes_arg_pos_fields(g2_db, monkeypatch):
     """find_taint_sinks must include caller_arg_pos and callee_param_pos in every result dict."""
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     db = kuzu.Database(str(g2_db))
     conn = kuzu.Connection(db)
     monkeypatch.setattr(mcp_mod, "_conn", conn)

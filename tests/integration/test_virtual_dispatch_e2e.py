@@ -18,7 +18,7 @@ import tempfile
 import kuzu
 import pytest
 
-from dedalus.indexer import index_repo
+from orihime.indexer import index_repo
 
 FIXTURES_DIR = os.path.join(
     os.path.dirname(__file__),

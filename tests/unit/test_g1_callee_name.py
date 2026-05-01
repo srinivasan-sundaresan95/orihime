@@ -14,7 +14,7 @@ import tempfile
 import kuzu
 import pytest
 
-from dedalus.indexer import index_repo
+from orihime.indexer import index_repo
 
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"
 
@@ -89,7 +89,7 @@ def test_calls_edge_callee_name_is_short_not_fqn(g1_conn):
 
 def test_find_external_calls_returns_list(g1_db, monkeypatch):
     """find_external_calls must return a list (possibly empty for a single-repo index)."""
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     db = kuzu.Database(str(g1_db))
     conn = kuzu.Connection(db)
     monkeypatch.setattr(mcp_mod, "_conn", conn)

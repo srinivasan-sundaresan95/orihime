@@ -1,4 +1,4 @@
-"""Integration tests for indexing point-bitcoin-internal-api into Dedalus."""
+"""Integration tests for indexing point-bitcoin-internal-api into Orihime."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ import tempfile
 import kuzu
 import pytest
 
-from dedalus.indexer import index_repo
+from orihime.indexer import index_repo
 
 BITCOIN_REPO_PATH = "/mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bitcoin-internal-api"
 BITCOIN_REPO_NAME = "point-bitcoin-internal-api"

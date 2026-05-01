@@ -20,7 +20,7 @@ The 9 MCP tools cover the full set of questions an engineer asks when navigating
 The MCP server holds two named KuzuDB connections:
 
 ```
-KUZU_LOCAL_PATH=~/.dedalus/dedalus.db    → always required (local embedded)
+KUZU_LOCAL_PATH=~/.orihime/orihime.db    → always required (local embedded)
 KUZU_SERVER_URL=http://bmaas:8000    → optional (team server)
 ```
 
@@ -52,11 +52,11 @@ The MCP server is registered in `~/.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "dedalus": {
+    "orihime": {
       "command": "python",
       "args": ["-m", "dedalus.mcp_server"],
       "env": {
-        "KUZU_LOCAL_PATH": "/home/srini/.dedalus/dedalus.db"
+        "KUZU_LOCAL_PATH": "/home/srini/.orihime/orihime.db"
       }
     }
   }

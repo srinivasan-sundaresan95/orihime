@@ -13,9 +13,9 @@ P3-2.2 — _extract_url_from_uri_builder:
 """
 from __future__ import annotations
 
-import dedalus.java_extractor  # noqa: F401 — triggers register()
-from dedalus.java_extractor import JavaExtractor
-from dedalus.language import get_parser
+import orihime.java_extractor  # noqa: F401 — triggers register()
+from orihime.java_extractor import JavaExtractor
+from orihime.language import get_parser
 
 
 def _parse_and_extract(src: bytes) -> "ExtractResult":

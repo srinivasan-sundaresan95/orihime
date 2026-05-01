@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from dedalus.kotlin_extractor import KotlinExtractor
-from dedalus.language import get_parser
+from orihime.kotlin_extractor import KotlinExtractor
+from orihime.language import get_parser
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "SampleController.kt"
 

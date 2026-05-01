@@ -1,8 +1,8 @@
-# Dedalus
+# Orihime
 
-A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript codebases. Dedalus indexes your source code into an embedded [KuzuDB](https://kuzudb.com/) graph database using [tree-sitter](https://tree-sitter.github.io/) and exposes the graph through an MCP server, a CLI, and a local web UI.
+A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript codebases. Orihime indexes your source code into an embedded [KuzuDB](https://kuzudb.com/) graph database using [tree-sitter](https://tree-sitter.github.io/) and exposes the graph through an MCP server, a CLI, and a local web UI.
 
-> **Mythology**: Dedalus was the architect who designed the labyrinth — the one who understood its structure when no one else did.
+> **Mythology**: Orihime (織姫) is Vega — the weaving princess who weaves the fabric of the cosmos. She weaves connections. The tool that weaves your codebase into a single graph.
 
 ---
 
@@ -27,13 +27,13 @@ A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript co
 pip install -e .
 
 # Index a repository
-python -m dedalus index --repo /path/to/your/repo --name my-service
+python -m orihime index --repo /path/to/your/repo --name my-service
 
 # Start the web UI
-python -m dedalus ui          # http://localhost:7700
+python -m orihime ui          # http://localhost:7700
 
 # Start the MCP server (for Claude / any MCP client)
-python -m dedalus serve
+python -m orihime serve
 ```
 
 ### Prerequisites
@@ -46,11 +46,11 @@ python -m dedalus serve
 ## CLI Reference
 
 ```
-python -m dedalus index  --repo PATH  --name NAME  [--db PATH] [--force] [--branch NAME]
-python -m dedalus ui     [--port 7700] [--db PATH]
-python -m dedalus serve
-python -m dedalus resolve  [--db PATH]
-python -m dedalus write-server  [--port 7701] [--db PATH]
+python -m orihime index  --repo PATH  --name NAME  [--db PATH] [--force] [--branch NAME]
+python -m orihime ui     [--port 7700] [--db PATH]
+python -m orihime serve
+python -m orihime resolve  [--db PATH]
+python -m orihime write-server  [--port 7701] [--db PATH]
 ```
 
 | Command | Description |
@@ -68,7 +68,7 @@ By default, `index` skips any file whose git blob hash matches the stored hash. 
 ### Branch Support
 
 ```bash
-python -m dedalus index --repo /path --name my-service --branch feature/my-branch
+python -m orihime index --repo /path --name my-service --branch feature/my-branch
 ```
 
 Graph nodes are tagged with `branch_name` for multi-branch analysis.
@@ -96,16 +96,16 @@ The Findings page aggregates:
 
 ## MCP Tools
 
-Connect Claude Code (or any MCP client) to the Dedalus MCP server with:
+Connect Claude Code (or any MCP client) to the Orihime MCP server with:
 
 ```json
 {
   "mcpServers": {
-    "dedalus": {
+    "orihime": {
       "command": "python3",
-      "args": ["-m", "dedalus", "serve"],
+      "args": ["-m", "orihime", "serve"],
       "cwd": "/path/to/indra",
-      "env": { "DEDALUS_DB_PATH": "/home/user/.dedalus/dedalus.db" }
+      "env": { "ORIHIME_DB_PATH": "/home/user/.orihime/orihime.db" }
     }
   }
 }
@@ -185,12 +185,12 @@ Connect Claude Code (or any MCP client) to the Dedalus MCP server with:
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEDALUS_DB_PATH` | `~/.dedalus/dedalus.db` | Path to KuzuDB database directory |
-| `DEDALUS_SERVER_URL` | _(unset)_ | URL of the write-serialization server (team mode) |
+| `ORIHIME_DB_PATH` | `~/.orihime/orihime.db` | Path to KuzuDB database directory |
+| `ORIHIME_SERVER_URL` | _(unset)_ | URL of the write-serialization server (team mode) |
 
 ### Custom Sources and Sinks
 
-Create `~/.dedalus/security_config.yaml` (or set `DEDALUS_SECURITY_CONFIG`):
+Create `~/.orihime/security_config.yaml` (or set `ORIHIME_SECURITY_CONFIG`):
 
 ```yaml
 sources:
@@ -216,13 +216,13 @@ KuzuDB has a single-writer constraint. In team deployments where multiple develo
 
 ```bash
 # On the shared server — owns the KuzuDB connection
-python -m dedalus write-server --port 7701 --db /shared/dedalus.db
+python -m orihime write-server --port 7701 --db /shared/orihime.db
 
 # Each developer's indexer sends writes to the server
-DEDALUS_SERVER_URL=http://server:7701 python -m dedalus index --repo /path --name my-service
+ORIHIME_SERVER_URL=http://server:7701 python -m orihime index --repo /path --name my-service
 ```
 
-Developers running locally do not set `DEDALUS_SERVER_URL` — they open KuzuDB directly as always.
+Developers running locally do not set `ORIHIME_SERVER_URL` — they open KuzuDB directly as always.
 
 The web UI and MCP server always read directly from KuzuDB (reads do not go through the write server).
 
@@ -295,7 +295,7 @@ Batch write speedup vs naive per-row writes: **12×** (G5 Fix-A).
 
 ## Feature Comparison
 
-| Capability | Dedalus | GitNexus | SonarQube Community | SonarQube Enterprise |
+| Capability | Orihime | GitNexus | SonarQube Community | SonarQube Enterprise |
 |---|---|---|---|---|
 | Cross-file taint (SAST) | ✓ | ✗ | ✓ | ✓ |
 | Custom sources/sinks | ✓ (YAML) | ✗ | ✗ | ✓ |
@@ -312,22 +312,22 @@ Batch write speedup vs naive per-row writes: **12×** (G5 Fix-A).
 | Embedded DB (no server daemon) | ✓ | ✓ | N/A | N/A |
 | License | MIT | PolyForm NC | LGPL | Commercial |
 
-> GitNexus's PolyForm Non-Commercial license prohibits commercial use. Dedalus is MIT-licensed and unrestricted.
+> GitNexus's PolyForm Non-Commercial license prohibits commercial use. Orihime is MIT-licensed and unrestricted.
 
 ---
 
 ## Platform Context
 
-Dedalus is the **code-structure explanation layer** in a wider observability platform:
+Orihime is the **code-structure explanation layer** in a wider observability platform:
 
 | Project | Role |
 |---|---|
-| **Dedalus** (this repo) | Code knowledge graph — what the code does structurally |
+| **Orihime** (this repo) | Code knowledge graph — what the code does structurally |
 | **Styx** | SLI aggregator — what the running system is doing right now |
-| **Sibyl** | Daily early-warning: Styx yesterday × Dedalus → performance risk report |
-| **Charon** | Incident analyzer: PagerDuty alert × Styx × Kibana × Dedalus → correlated root-cause |
+| **Sibyl** | Daily early-warning: Styx yesterday × Orihime → performance risk report |
+| **Charon** | Incident analyzer: PagerDuty alert × Styx × Kibana × Orihime → correlated root-cause |
 
-Dedalus is deliberately free of Rakuten-specific integrations so it can be open-sourced. Sibyl and Charon are separate projects.
+Orihime is deliberately free of Rakuten-specific integrations so it can be open-sourced. Sibyl and Charon are separate projects.
 
 ---
 

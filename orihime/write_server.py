@@ -40,7 +40,7 @@ class WriteResponse(BaseModel):
 @app.on_event("startup")
 async def _startup() -> None:
     global _db, _conn
-    db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".dedalus" / "orihime.db"))
+    db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".orihime" / "orihime.db"))
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     _db = kuzu.Database(str(db_path))
     _conn = kuzu.Connection(_db)
@@ -62,7 +62,7 @@ async def write(req: WriteRequest) -> WriteResponse:
 
 @app.get("/health")
 async def health() -> dict:
-    db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".dedalus" / "orihime.db"))
+    db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".orihime" / "orihime.db"))
     return {"status": "ok", "db_path": db_path}
 
 

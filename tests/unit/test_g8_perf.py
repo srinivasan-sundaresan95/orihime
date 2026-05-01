@@ -13,7 +13,7 @@ import tempfile
 
 import pytest
 
-from dedalus.perf_ingest import (
+from orihime.perf_ingest import (
     parse_gatling,
     parse_jmeter,
     parse_json,
@@ -212,9 +212,9 @@ def test_gatling_percentile_values():
 
 def test_ingest_perf_results_integration():
     import kuzu
-    from dedalus.indexer import index_repo
-    from dedalus.mcp_server import ingest_perf_results as _ipr, _reset_connection
-    import dedalus.mcp_server as mcp_mod
+    from orihime.indexer import index_repo
+    from orihime.mcp_server import ingest_perf_results as _ipr, _reset_connection
+    import orihime.mcp_server as mcp_mod
 
     java_src = """\
 package com.example;
@@ -268,13 +268,13 @@ public class ItemController {
 
 def test_find_hotspots_integration():
     import kuzu
-    from dedalus.indexer import index_repo
-    from dedalus.mcp_server import (
+    from orihime.indexer import index_repo
+    from orihime.mcp_server import (
         ingest_perf_results as _ipr,
         find_hotspots as _fh,
         _reset_connection,
     )
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
 
     java_src = """\
 package com.example;
@@ -339,13 +339,13 @@ public class HotService {
 
 def test_estimate_capacity_integration():
     import kuzu
-    from dedalus.indexer import index_repo
-    from dedalus.mcp_server import (
+    from orihime.indexer import index_repo
+    from orihime.mcp_server import (
         ingest_perf_results as _ipr,
         estimate_capacity as _ec,
         _reset_connection,
     )
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
 
     java_src = """\
 package com.example;

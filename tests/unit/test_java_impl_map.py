@@ -16,9 +16,9 @@ import pathlib
 
 import pytest
 
-import dedalus.java_extractor  # noqa: F401 — triggers register()
-from dedalus.java_extractor import JavaExtractor, _extract_impl_map
-from dedalus.language import get_parser
+import orihime.java_extractor  # noqa: F401 — triggers register()
+from orihime.java_extractor import JavaExtractor, _extract_impl_map
+from orihime.language import get_parser
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 
@@ -34,7 +34,7 @@ def _parse(fixture_name: str):
     tree = parser.parse(src)
     root = tree.root_node
     # Extract package via the same helper used internally
-    from dedalus.java_extractor import _extract_package
+    from orihime.java_extractor import _extract_package
     package = _extract_package(root, src)
     return root, src, package
 
@@ -171,7 +171,7 @@ def test_extract_result_impl_map_default_is_empty_dict():
     """Two separate ExtractResult instances must each start with their own empty
     impl_map (default_factory=dict, not a shared mutable default).
     """
-    from dedalus.language import ExtractResult
+    from orihime.language import ExtractResult
     r1 = ExtractResult()
     r2 = ExtractResult()
     assert r1.impl_map == {}
@@ -186,7 +186,7 @@ def test_extract_result_impl_map_default_is_empty_dict():
 
 def test_parse_result_impl_map_field_exists():
     """ParseResult must expose an impl_map field that defaults to {}."""
-    from dedalus.parse_result import ParseResult
+    from orihime.parse_result import ParseResult
     pr = ParseResult(
         file_id="f1",
         file_path="/some/file.java",
@@ -199,7 +199,7 @@ def test_parse_result_impl_map_field_exists():
 
 def test_parse_result_impl_map_not_shared():
     """ParseResult.impl_map must use default_factory=dict (not a class-level default)."""
-    from dedalus.parse_result import ParseResult
+    from orihime.parse_result import ParseResult
     pr1 = ParseResult(file_id="f1", file_path="/a.java", lang="java", repo_id="r1")
     pr2 = ParseResult(file_id="f2", file_path="/b.java", lang="java", repo_id="r1")
     pr1.impl_map["com.example.Foo"] = "com.example.FooImpl"

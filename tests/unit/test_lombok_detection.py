@@ -1,7 +1,7 @@
 """Unit tests for _is_lombok_generated (P5-3) — pure logic, no tree-sitter."""
 from __future__ import annotations
 
-from dedalus.java_extractor import _is_lombok_generated
+from orihime.java_extractor import _is_lombok_generated
 
 
 # ---------------------------------------------------------------------------

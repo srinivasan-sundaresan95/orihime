@@ -18,8 +18,8 @@ import kuzu
 import pytest
 from starlette.testclient import TestClient
 
-from dedalus.schema import init_schema
-from dedalus.ui_server import _DB, _make_app
+from orihime.schema import init_schema
+from orihime.ui_server import _DB, _make_app
 
 
 # ---------------------------------------------------------------------------

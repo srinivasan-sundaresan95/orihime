@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import uuid
 
-import dedalus.kotlin_extractor  # noqa: F401 — triggers register()
-from dedalus.language import get_parser
-from dedalus.resolver import build_fqn_index, resolve_calls
+import orihime.kotlin_extractor  # noqa: F401 — triggers register()
+from orihime.language import get_parser
+from orihime.resolver import build_fqn_index, resolve_calls
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ def test_same_file_object_call_resolves_no_impl_index():
     """DateTimeUtil.isInTimePeriod() in the same file resolves to CALLS (no impl_index)."""
     tree, src = _parse_kotlin(SAME_FILE_SRC)
 
-    from dedalus.kotlin_extractor import KotlinExtractor
+    from orihime.kotlin_extractor import KotlinExtractor
     extractor = KotlinExtractor()
     result = extractor.extract(tree, src, "Test.kt", "repo1")
 

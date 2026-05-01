@@ -8,7 +8,7 @@ import tempfile
 import kuzu
 import pytest
 
-from dedalus.indexer import index_repo
+from orihime.indexer import index_repo
 
 # ---------------------------------------------------------------------------
 # Inline Java fixture: one method that calls an unknown method

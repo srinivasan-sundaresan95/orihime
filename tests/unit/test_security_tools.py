@@ -6,8 +6,8 @@ import tempfile
 
 import pytest
 
-from dedalus.indexer import index_repo
-from dedalus.security_config import load_security_config, SecurityConfig
+from orihime.indexer import index_repo
+from orihime.security_config import load_security_config, SecurityConfig
 
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"
 
@@ -86,7 +86,7 @@ def security_db():
 
 
 def test_find_cross_service_taint_returns_list(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -105,7 +105,7 @@ def test_find_cross_service_taint_returns_list(security_db, monkeypatch):
 
 
 def test_find_taint_sinks_returns_list(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -121,7 +121,7 @@ def test_find_taint_sinks_returns_list(security_db, monkeypatch):
 
 
 def test_list_security_config_returns_dict():
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     result = mcp_mod.list_security_config()
     assert isinstance(result, dict)
     assert "source_annotations" in result
@@ -132,7 +132,7 @@ def test_list_security_config_returns_dict():
 
 
 def test_find_second_order_injection_returns_list(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -151,7 +151,7 @@ def test_find_second_order_injection_returns_list(security_db, monkeypatch):
 
 
 def test_generate_security_report_owasp(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -167,7 +167,7 @@ def test_generate_security_report_owasp(security_db, monkeypatch):
 
 
 def test_generate_security_report_cwe(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -182,7 +182,7 @@ def test_generate_security_report_cwe(security_db, monkeypatch):
 
 
 def test_generate_security_report_invalid_framework(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -195,7 +195,7 @@ def test_generate_security_report_invalid_framework(security_db, monkeypatch):
 
 
 def test_list_branches_returns_list(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)

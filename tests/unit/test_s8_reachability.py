@@ -6,12 +6,12 @@ import tempfile
 
 import pytest
 
-import dedalus.java_extractor  # noqa: F401 — triggers register()
-import dedalus.kotlin_extractor  # noqa: F401 — triggers register()
-from dedalus.java_extractor import JavaExtractor
-from dedalus.kotlin_extractor import KotlinExtractor
-from dedalus.language import get_parser
-from dedalus.indexer import index_repo
+import orihime.java_extractor  # noqa: F401 — triggers register()
+import orihime.kotlin_extractor  # noqa: F401 — triggers register()
+from orihime.java_extractor import JavaExtractor
+from orihime.kotlin_extractor import KotlinExtractor
+from orihime.language import get_parser
+from orihime.indexer import index_repo
 
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"
 
@@ -155,7 +155,7 @@ def security_db():
 
 
 def test_find_entry_points_returns_list(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -172,7 +172,7 @@ def test_find_entry_points_returns_list(security_db, monkeypatch):
 
 
 def test_find_reachable_sinks_returns_list(security_db, monkeypatch):
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)
@@ -187,7 +187,7 @@ def test_find_reachable_sinks_returns_list(security_db, monkeypatch):
 
 def test_find_reachable_sinks_show_all_returns_same_or_more(security_db, monkeypatch):
     """show_all=True must return >= results than show_all=False (no filtering)."""
-    import dedalus.mcp_server as mcp_mod
+    import orihime.mcp_server as mcp_mod
     import kuzu
     db = kuzu.Database(str(security_db))
     conn = kuzu.Connection(db)

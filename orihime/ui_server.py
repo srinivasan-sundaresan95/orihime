@@ -1782,7 +1782,7 @@ def _make_app(db: _DB, db_path: str):
             reachable_only=reachable_only,
         )
         safe_name = (repo_name or "findings").replace("/", "_").replace("\\", "_")
-        filename = f"dedalus-findings-{safe_name}.json"
+        filename = f"orihime-findings-{safe_name}.json"
         body = _json.dumps(data, indent=2)
         return Response(
             content=body,
@@ -1824,7 +1824,7 @@ def _make_app(db: _DB, db_path: str):
 def run_ui(port: int = 7700, db_path: str = "") -> None:
     """Start the Orihime web UI on *port*, opening a browser automatically."""
     if not db_path:
-        db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".dedalus" / "orihime.db"))
+        db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".orihime" / "orihime.db"))
 
     import uvicorn  # noqa: PLC0415
 

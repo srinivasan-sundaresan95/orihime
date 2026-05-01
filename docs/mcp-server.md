@@ -1,6 +1,6 @@
-# Dedalus MCP Server
+# Orihime MCP Server
 
-Dedalus exposes its code knowledge graph as an [MCP](https://modelcontextprotocol.io) server so that AI assistants (Claude Code, Claude Desktop) can query it via natural language.
+Orihime exposes its code knowledge graph as an [MCP](https://modelcontextprotocol.io) server so that AI assistants (Claude Code, Claude Desktop) can query it via natural language.
 
 ## Quick start
 
@@ -8,10 +8,10 @@ Index a repo first, then start the server:
 
 ```bash
 # Index one or more repos
-python -m dedalus index --repo /path/to/my-repo --name my-repo
+python -m orihime index --repo /path/to/my-repo --name my-repo
 
 # Start the MCP server (stdio transport)
-python -m dedalus serve
+python -m orihime serve
 ```
 
 ## Claude Code registration
@@ -21,13 +21,13 @@ Add the following to `~/.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "dedalus": {
+    "orihime": {
       "type": "stdio",
       "command": "/path/to/dedalus/.venv/bin/python",
-      "args": ["-m", "dedalus", "serve"],
+      "args": ["-m", "orihime", "serve"],
       "cwd": "/path/to/dedalus",
       "env": {
-        "DEDALUS_DB_PATH": "/home/youruser/.dedalus/dedalus.db"
+        "ORIHIME_DB_PATH": "/home/youruser/.orihime/orihime.db"
       }
     }
   }
@@ -40,8 +40,8 @@ After adding this entry, restart Claude Code. The `dedalus` MCP server will appe
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `DEDALUS_DB_PATH` | `~/.dedalus/dedalus.db` | Path to the KuzuDB database |
-| `DEDALUS_SERVER_URL` | *(unset)* | Reserved for Phase 2 (remote KuzuDB HTTP endpoint) |
+| `ORIHIME_DB_PATH` | `~/.orihime/orihime.db` | Path to the KuzuDB database |
+| `ORIHIME_SERVER_URL` | *(unset)* | Reserved for Phase 2 (remote KuzuDB HTTP endpoint) |
 
 ## Available tools
 
@@ -109,11 +109,11 @@ index_repo_tool("/home/srini/repos/my-service", "my-service")
 
 The server opens the KuzuDB lazily on the first tool call and reuses the connection for the lifetime of the process. After `index_repo_tool` completes, the connection is reset so subsequent queries see the freshly-indexed data.
 
-If `DEDALUS_DB_PATH` doesn't exist yet (no repo indexed), all query tools return empty results gracefully instead of raising an error.
+If `ORIHIME_DB_PATH` doesn't exist yet (no repo indexed), all query tools return empty results gracefully instead of raising an error.
 
 ## Phase 2: Team / server mode
 
-Set `DEDALUS_SERVER_URL` to a remote KuzuDB HTTP endpoint to share a single indexed graph across a team. The local file is ignored when this variable is set. Implementation is deferred to Phase 2.
+Set `ORIHIME_SERVER_URL` to a remote KuzuDB HTTP endpoint to share a single indexed graph across a team. The local file is ignored when this variable is set. Implementation is deferred to Phase 2.
 
 ## Known limitations
 

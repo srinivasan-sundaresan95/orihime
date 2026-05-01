@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import uuid
 
-import dedalus.java_extractor  # noqa: F401 — triggers register()
-from dedalus.language import get_parser
-from dedalus.resolver import CallEdge, build_fqn_index, resolve_calls
+import orihime.java_extractor  # noqa: F401 — triggers register()
+from orihime.language import get_parser
+from orihime.resolver import CallEdge, build_fqn_index, resolve_calls
 
 
 # ---------------------------------------------------------------------------

@@ -11,12 +11,12 @@ import os
 
 import pytest
 
-import dedalus.java_extractor  # noqa: F401 — trigger register()
-import dedalus.kotlin_extractor  # noqa: F401 — trigger register()
+import orihime.java_extractor  # noqa: F401 — trigger register()
+import orihime.kotlin_extractor  # noqa: F401 — trigger register()
 
-from dedalus.java_extractor import JavaExtractor
-from dedalus.kotlin_extractor import KotlinExtractor
-from dedalus.language import get_parser
+from orihime.java_extractor import JavaExtractor
+from orihime.kotlin_extractor import KotlinExtractor
+from orihime.language import get_parser
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +292,9 @@ def test_multiple_hints_combined():
 def test_find_complexity_hints_integration():
     """Index a fixture file containing loops and check find_complexity_hints."""
     import kuzu
-    from dedalus.indexer import index_repo
-    from dedalus.mcp_server import find_complexity_hints as _fch, _reset_connection
-    import dedalus.mcp_server as mcp_mod
+    from orihime.indexer import index_repo
+    from orihime.mcp_server import find_complexity_hints as _fch, _reset_connection
+    import orihime.mcp_server as mcp_mod
 
     # Build a tiny fixture with a nested loop
     java_src = """\

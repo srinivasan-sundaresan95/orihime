@@ -17,12 +17,12 @@ import uuid
 
 import pytest
 
-import dedalus.java_extractor  # noqa: F401 — triggers register()
-import dedalus.kotlin_extractor  # noqa: F401 — triggers register()
-from dedalus.java_extractor import JavaExtractor
-from dedalus.kotlin_extractor import KotlinExtractor
-from dedalus.language import get_parser
-from dedalus.resolver import CallEdge, build_fqn_index, resolve_calls
+import orihime.java_extractor  # noqa: F401 — triggers register()
+import orihime.kotlin_extractor  # noqa: F401 — triggers register()
+from orihime.java_extractor import JavaExtractor
+from orihime.kotlin_extractor import KotlinExtractor
+from orihime.language import get_parser
+from orihime.resolver import CallEdge, build_fqn_index, resolve_calls
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 JAVA_FIXTURE = FIXTURES / "ConstructorCalls.java"

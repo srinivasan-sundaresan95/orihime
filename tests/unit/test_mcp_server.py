@@ -1,4 +1,4 @@
-"""Unit tests for dedalus.mcp_server — all 10 tools.
+"""Unit tests for orihime.mcp_server — all 10 tools.
 
 Strategy
 --------
@@ -21,9 +21,9 @@ from unittest.mock import patch
 import kuzu
 import pytest
 
-from dedalus.schema import init_schema
-import dedalus.mcp_server as mcp_mod
-from dedalus.mcp_server import (
+from orihime.schema import init_schema
+import orihime.mcp_server as mcp_mod
+from orihime.mcp_server import (
     blast_radius,
     find_callers,
     find_callees,
@@ -182,39 +182,39 @@ class TestNoConnection:
     """All query tools must degrade gracefully when the DB is absent."""
 
     def test_find_callers_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert find_callers("any.Method") == []
 
     def test_find_callees_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert find_callees("any.Method") == []
 
     def test_find_endpoint_callers_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert find_endpoint_callers("GET", "/any") == []
 
     def test_find_repo_dependencies_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert find_repo_dependencies("any-repo") == []
 
     def test_blast_radius_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert blast_radius("any.Method") == []
 
     def test_search_symbol_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert search_symbol("anything") == []
 
     def test_get_file_location_returns_none(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert get_file_location("any.FQN") is None
 
     def test_list_endpoints_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert list_endpoints("") == []
 
     def test_list_unresolved_calls_returns_empty_list(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert list_unresolved_calls("") == []
 
     @pytest.mark.parametrize("tool,args", [
@@ -225,12 +225,12 @@ class TestNoConnection:
         (list_unresolved_calls,   ("",)),
     ])
     def test_all_list_tools_return_empty_list(self, tool, args) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             result = tool(*args)
             assert result == [], f"{tool.__name__} should return [] but got {result!r}"
 
     def test_get_file_location_returns_none_parametrized(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert get_file_location("no.such.FQN") is None
 
 
@@ -495,7 +495,7 @@ class TestListReposNoConnection:
     """list_repos must degrade gracefully when the DB is absent."""
 
     def test_list_repos_no_connection_returns_empty(self) -> None:
-        with patch("dedalus.mcp_server._get_connection", return_value=None):
+        with patch("orihime.mcp_server._get_connection", return_value=None):
             assert list_repos() == []
 
 
@@ -510,7 +510,7 @@ class TestListReposEmptyDB:
         conn = _make_conn()
         init_schema(conn)
         # Do not populate any data
-        import dedalus.mcp_server as _mod
+        import orihime.mcp_server as _mod
         from unittest.mock import patch as _patch
         with _patch.object(_mod, "_conn", conn), _patch.object(_mod, "_db", object()):
             result = list_repos()

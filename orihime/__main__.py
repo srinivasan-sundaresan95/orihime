@@ -8,7 +8,7 @@ from pathlib import Path
 
 from orihime.indexer import index_repo
 
-_DEFAULT_DB_PATH = str(Path.home() / ".dedalus" / "orihime.db")
+_DEFAULT_DB_PATH = str(Path.home() / ".orihime" / "orihime.db")
 
 
 def main() -> None:
@@ -128,7 +128,7 @@ def main() -> None:
     legacy_parser.add_argument("--name", required=True, help="Logical name for the repository")
     legacy_parser.add_argument(
         "--db",
-        default=str(Path.home() / ".dedalus" / "orihime.db"),
+        default=str(Path.home() / ".orihime" / "orihime.db"),
         help="Path to the KuzuDB database file (default: ~/.orihime/orihime.db)",
     )
     legacy_args = legacy_parser.parse_args()

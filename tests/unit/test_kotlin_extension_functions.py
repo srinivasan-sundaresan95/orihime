@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from dedalus.kotlin_extractor import KotlinExtractor
-from dedalus.language import get_parser
-from dedalus.resolver import build_fqn_index, resolve_calls
+from orihime.kotlin_extractor import KotlinExtractor
+from orihime.language import get_parser
+from orihime.resolver import build_fqn_index, resolve_calls
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "ExtensionFunctions.kt"
 

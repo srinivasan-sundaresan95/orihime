@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-_DEFAULT_DB_PATH = str(Path.home() / ".dedalus" / "orihime.db")
+_DEFAULT_DB_PATH = str(Path.home() / ".orihime" / "orihime.db")
 
 # ORIHIME_SERVER_URL — reserved for Phase 2 (remote KuzuDB HTTP endpoint).
 # Not used in Phase 1; present only for forward-compatibility.

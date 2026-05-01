@@ -1,4 +1,4 @@
-"""Unit tests for dedalus.indexer.index_repo."""
+"""Unit tests for orihime.indexer.index_repo."""
 from __future__ import annotations
 
 import pathlib
@@ -8,7 +8,7 @@ import tempfile
 import kuzu
 import pytest
 
-from dedalus.indexer import index_repo, _git_blob_hash
+from orihime.indexer import index_repo, _git_blob_hash
 
 # The fixtures directory contains Sample.java — a single-file mini-repo
 FIXTURES_DIR = pathlib.Path(__file__).parent.parent / "fixtures"

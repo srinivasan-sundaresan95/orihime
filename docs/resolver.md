@@ -1,4 +1,4 @@
-# Dedalus Resolver
+# Orihime Resolver
 
 ## What the resolver does
 

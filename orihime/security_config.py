@@ -177,7 +177,7 @@ def load_security_config(config_path: str | Path | None = None) -> SecurityConfi
     """
     if config_path is None:
         config_path = Path(
-            os.environ.get("ORIHIME_SECURITY_CONFIG", str(Path.home() / ".dedalus" / "security.yml"))
+            os.environ.get("ORIHIME_SECURITY_CONFIG", str(Path.home() / ".orihime" / "security.yml"))
         )
     user = _load_yaml_config(Path(config_path))
 

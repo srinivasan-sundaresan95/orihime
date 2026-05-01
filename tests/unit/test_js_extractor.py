@@ -1,11 +1,11 @@
-"""Unit tests for dedalus.js_extractor — JsExtractor on inline JS/TS source."""
+"""Unit tests for orihime.js_extractor — JsExtractor on inline JS/TS source."""
 from __future__ import annotations
 
 import pytest
 
-import dedalus.js_extractor  # noqa: F401 — triggers register()
-from dedalus.js_extractor import JsExtractor
-from dedalus.language import get_parser
+import orihime.js_extractor  # noqa: F401 — triggers register()
+from orihime.js_extractor import JsExtractor
+from orihime.language import get_parser
 
 FILE_ID = "file1"
 REPO_ID = "repo1"

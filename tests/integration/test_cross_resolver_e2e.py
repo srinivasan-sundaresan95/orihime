@@ -18,8 +18,8 @@ import textwrap
 import kuzu
 import pytest
 
-from dedalus.indexer import index_repo
-from dedalus.cross_resolver import run_cross_resolution
+from orihime.indexer import index_repo
+from orihime.cross_resolver import run_cross_resolution
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def cross_e2e_fullurl():
     url_pattern is "http://wallet-svc/wallet/balance" must still match the
     Endpoint at "/wallet/balance" after the scheme+host prefix is stripped.
     """
-    from dedalus.indexer import index_repo
+    from orihime.indexer import index_repo
 
     with tempfile.TemporaryDirectory() as repo_a_dir:
         with tempfile.TemporaryDirectory() as repo_b_dir:

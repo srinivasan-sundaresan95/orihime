@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from dedalus.cross_resolver import _strip_scheme_host
-from dedalus.path_utils import compile_path_regex, match_url_pattern
+from orihime.cross_resolver import _strip_scheme_host
+from orihime.path_utils import compile_path_regex, match_url_pattern
 
 
 # ---------------------------------------------------------------------------

@@ -9,9 +9,9 @@ from __future__ import annotations
 import pathlib
 import uuid
 
-import dedalus.java_extractor  # noqa: F401 — triggers register()
-from dedalus.language import get_parser
-from dedalus.resolver import CallEdge, resolve_calls
+import orihime.java_extractor  # noqa: F401 — triggers register()
+from orihime.language import get_parser
+from orihime.resolver import CallEdge, resolve_calls
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 DI_CALLER_JAVA = FIXTURES / "DICallerClass.java"

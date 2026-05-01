@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import pathlib
 
-import dedalus.java_extractor  # noqa: F401 — triggers register()
-from dedalus.java_extractor import JavaExtractor
-from dedalus.language import get_parser
-from dedalus.resolver import build_fqn_index, resolve_calls
+import orihime.java_extractor  # noqa: F401 — triggers register()
+from orihime.java_extractor import JavaExtractor
+from orihime.language import get_parser
+from orihime.resolver import build_fqn_index, resolve_calls
 
 FIXTURE = pathlib.Path(__file__).parent.parent / "fixtures" / "StaticFieldCalls.java"
 

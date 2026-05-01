@@ -1,4 +1,4 @@
-"""Unit tests for S11 — License Compliance (dedalus.license_checker)."""
+"""Unit tests for S11 — License Compliance (orihime.license_checker)."""
 from __future__ import annotations
 
 import os
@@ -10,15 +10,15 @@ from unittest.mock import patch
 import kuzu
 import pytest
 
-from dedalus.license_checker import (
+from orihime.license_checker import (
     DEFAULT_ALLOWED,
     check_licenses,
     parse_gradle,
     parse_pom_xml,
 )
-from dedalus.schema import init_schema
-import dedalus.mcp_server as mcp_mod
-from dedalus.mcp_server import find_license_violations
+from orihime.schema import init_schema
+import orihime.mcp_server as mcp_mod
+from orihime.mcp_server import find_license_violations
 
 
 # ---------------------------------------------------------------------------

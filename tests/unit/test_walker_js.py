@@ -4,9 +4,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import dedalus.js_extractor  # noqa: F401 — triggers registration of JS/TS extensions
+import orihime.js_extractor  # noqa: F401 — triggers registration of JS/TS extensions
 
-from dedalus.walker import walk_repo
+from orihime.walker import walk_repo
 
 
 def _create_temp_repo(files: dict[str, bytes]) -> Path:
@@ -108,7 +108,7 @@ def test_node_modules_excluded():
 # ---------------------------------------------------------------------------
 
 def test_mixed_repo_yields_both_java_and_typescript():
-    import dedalus.java_extractor  # noqa: F401
+    import orihime.java_extractor  # noqa: F401
 
     repo = _create_temp_repo({
         "src/main/java/Service.java": b"public class Service {}",

@@ -2,13 +2,13 @@
 
 **Date:** 2026-04-30  
 **Method:** Local token-normalised SequenceMatcher (difflib) — structure-only comparison (comments, strings, whitespace stripped)  
-**Dedalus source:** `dedalus/*.py` (13 files)  
+**Orihime source:** `dedalus/*.py` (13 files)  
 **Reference:** GitNexus v1.6.3 npm tarball (`dist/**/*.js`, 403 files; 46-file relevant subset used)  
 **Threshold:** 20% (per project policy)
 
 ## Result: PASS ✓
 
-| Dedalus file | Best GitNexus match | Similarity |
+| Orihime file | Best GitNexus match | Similarity |
 |------------|---------------------|------------|
 | schema.py | _shared/lbug/schema-constants.js | 10.5% |
 | cross_resolver.py | core/ingestion/languages/csharp/index.js | 5.8% |
@@ -29,9 +29,9 @@
 ## Notes
 
 - Highest match (`schema.py` vs `schema-constants.js`) reflects shared vocabulary (`method`, `class`, `repo`, `calls`, `endpoint`) inherent to any code-graph schema, not copied code. Both independently define node/edge tables for the same domain.
-- GitNexus is compiled TypeScript distributed as JS bundles. Dedalus is written in Python from scratch. The languages, frameworks, and implementation approaches are entirely different.
+- GitNexus is compiled TypeScript distributed as JS bundles. Orihime is written in Python from scratch. The languages, frameworks, and implementation approaches are entirely different.
 - No structural or algorithmic copying detected.
 
 ## Conclusion
 
-Dedalus is independently developed and safe to distribute internally under MIT licence.
+Orihime is independently developed and safe to distribute internally under MIT licence.

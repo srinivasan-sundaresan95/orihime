@@ -13,8 +13,8 @@ import pathlib
 
 import pytest
 
-from dedalus.kotlin_extractor import KotlinExtractor, _extract_kotlin_supertypes
-from dedalus.language import get_parser
+from orihime.kotlin_extractor import KotlinExtractor, _extract_kotlin_supertypes
+from orihime.language import get_parser
 
 FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
 

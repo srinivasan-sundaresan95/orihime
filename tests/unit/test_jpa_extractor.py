@@ -14,13 +14,13 @@ import pathlib
 import pytest
 
 # Trigger extractor registration
-import dedalus.java_extractor  # noqa: F401
+import orihime.java_extractor  # noqa: F401
 
-from dedalus.java_extractor import JavaExtractor, _build_import_map
-from dedalus.language import get_parser
+from orihime.java_extractor import JavaExtractor, _build_import_map
+from orihime.language import get_parser
 
 try:
-    from dedalus.java_extractor import _extract_entity_relations
+    from orihime.java_extractor import _extract_entity_relations
     _HAS_EXTRACT_ENTITY_RELATIONS = True
 except ImportError:
     _HAS_EXTRACT_ENTITY_RELATIONS = False

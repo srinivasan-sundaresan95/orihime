@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, call, patch
 import kuzu
 import pytest
 
-from dedalus.write_client import WriteClient
-from dedalus.indexer import _Writer
+from orihime.write_client import WriteClient
+from orihime.indexer import _Writer
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +77,9 @@ def _make_write_server_client():
     db_path = os.path.join(tmp_dir, "test.db")
 
     # Patch the env var before importing/using the app so _startup picks it up.
-    with patch.dict(os.environ, {"DEDALUS_DB_PATH": db_path}):
+    with patch.dict(os.environ, {"ORIHIME_DB_PATH": db_path}):
         # Reset module-level globals so each test gets a clean state.
-        import dedalus.write_server as ws
+        import orihime.write_server as ws
         ws._db = None
         ws._conn = None
 
@@ -95,7 +95,7 @@ def _fresh_client(db_path: str):
     and _conn is initialised before requests are made.
     """
     from fastapi.testclient import TestClient
-    import dedalus.write_server as ws
+    import orihime.write_server as ws
 
     # Reset module-level globals so this test gets its own fresh connection.
     ws._db = None
@@ -109,8 +109,8 @@ def test_write_server_ping():
     tmp_dir = tempfile.mkdtemp()
     db_path = os.path.join(tmp_dir, "test_ping.db")
 
-    with patch.dict(os.environ, {"DEDALUS_DB_PATH": db_path}):
-        import dedalus.write_server as ws
+    with patch.dict(os.environ, {"ORIHIME_DB_PATH": db_path}):
+        import orihime.write_server as ws
         ws._db = None
         ws._conn = None
         from fastapi.testclient import TestClient
@@ -126,8 +126,8 @@ def test_write_server_health():
     tmp_dir = tempfile.mkdtemp()
     db_path = os.path.join(tmp_dir, "test_health.db")
 
-    with patch.dict(os.environ, {"DEDALUS_DB_PATH": db_path}):
-        import dedalus.write_server as ws
+    with patch.dict(os.environ, {"ORIHIME_DB_PATH": db_path}):
+        import orihime.write_server as ws
         ws._db = None
         ws._conn = None
         from fastapi.testclient import TestClient
@@ -145,8 +145,8 @@ def test_write_server_write_executes_create():
     tmp_dir = tempfile.mkdtemp()
     db_path = os.path.join(tmp_dir, "test_write.db")
 
-    with patch.dict(os.environ, {"DEDALUS_DB_PATH": db_path}):
-        import dedalus.write_server as ws
+    with patch.dict(os.environ, {"ORIHIME_DB_PATH": db_path}):
+        import orihime.write_server as ws
         ws._db = None
         ws._conn = None
         from fastapi.testclient import TestClient
@@ -173,8 +173,8 @@ def test_write_server_write_returns_error_on_bad_cypher():
     tmp_dir = tempfile.mkdtemp()
     db_path = os.path.join(tmp_dir, "test_err.db")
 
-    with patch.dict(os.environ, {"DEDALUS_DB_PATH": db_path}):
-        import dedalus.write_server as ws
+    with patch.dict(os.environ, {"ORIHIME_DB_PATH": db_path}):
+        import orihime.write_server as ws
         ws._db = None
         ws._conn = None
         from fastapi.testclient import TestClient

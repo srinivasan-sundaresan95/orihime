@@ -1,4 +1,4 @@
-# Adding a Language to Dedalus
+# Adding a Language to Orihime
 
 This guide walks through adding support for a new programming language. The examples use `python` throughout; substitute your language name as needed.
 
@@ -59,7 +59,7 @@ _LANGUAGE_FACTORIES: dict[str, object] = {
 Run this in a Python shell or a scratch script before writing any extractor code:
 
 ```python
-from dedalus.language import get_parser
+from orihime.language import get_parser
 
 parser = get_parser("python")
 source = b"def hello(): pass"
@@ -80,7 +80,7 @@ The file must define a class that satisfies the `LanguageExtractor` Protocol and
 ```python
 from __future__ import annotations
 
-from dedalus.language import ExtractResult, LanguageExtractor, register
+from orihime.language import ExtractResult, LanguageExtractor, register
 
 
 class PythonExtractor:
@@ -142,7 +142,7 @@ At the bottom of `dedalus/python_extractor.py`, the `register(PythonExtractor())
 Then add the import to `dedalus/__init__.py`:
 
 ```python
-import dedalus.python_extractor  # registers PythonExtractor on import
+import orihime.python_extractor  # registers PythonExtractor on import
 ```
 
 The file walker imports `dedalus` before scanning files, so this guarantees the extractor is available before any `.py` file is processed.
@@ -178,8 +178,8 @@ from pathlib import Path
 
 import pytest
 
-import dedalus.python_extractor  # ensure registration side-effect runs
-from dedalus.language import get_extractor, get_parser
+import orihime.python_extractor  # ensure registration side-effect runs
+from orihime.language import get_extractor, get_parser
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.py"
 
