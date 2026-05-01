@@ -29,6 +29,57 @@ Skills use MCP tools only (no source file reads). Target: 5–8 tool calls per t
 
 ---
 
+### G10 — I/O Fan-out + Serial/Parallel Classification (~25h)
+
+**What**: For each entry-point method (HTTP handler, `@KafkaListener`, `@Scheduled`), count how many distinct I/O operations (DB calls, HTTP calls, cache reads) fire per invocation, and classify each as **serial** (latency adds) or **parallel** (latency = max of group).
+
+**Why this matters**: Knowing an endpoint makes 9 I/O calls is useful. Knowing 7 are parallel and 2 are serial tells you the actual latency structure — the parallel block costs the slowest single call, not the sum. This is the difference between a 50ms and a 450ms latency floor, derivable statically without any runtime profiler.
+
+This feature directly addresses a gap found during an Orihime vs baseline benchmark: Orihime's MCP tools identified call chains and repositories correctly but could not report how many I/O operations fire per request or whether they were parallelised.
+
+**I/O call sites detected:**
+- **DB**: JPA repository method calls (`findBy*`, `save`, `saveAll`, `delete`, `findAll`, `findById`, `count`, `existsById`); JDBC template calls (`execute`, `executeQuery`, `executeUpdate`, `query`, `queryForObject`, `queryForList`)
+- **HTTP**: Already-resolved `RestCall` nodes; `RestTemplate` (`exchange`, `getForObject`, `postForObject`); WebClient (`retrieve`, `bodyToMono`, `block`)
+- **Cache**: Spring `@Cacheable`/`@CacheEvict`; calls to `get`/`put`/`evict` on objects named `*cache*` or `cacheManager`
+
+**Parallel wrapper detection:**
+- Kotlin coroutines: `async { }` + `awaitAll()` / `coroutineScope { }`
+- Java `CompletableFuture`: `supplyAsync`, `runAsync`, `allOf`, `.thenCompose`, `.thenCombine`
+- Spring `@Async` annotation on the method
+- Reactor: `Mono.zip`, `Mono.when`, `Flux.merge`, `Flux.zip`
+
+**What becomes possible with perf data (G8 integration):**
+If perf results have been ingested via `ingest_perf_results`, Orihime can combine the fan-out topology with actual p99s:
+```
+Latency floor = sum(serial p99s) + max(parallel p99s)
+```
+This gives a real estimated minimum latency per endpoint from static structure alone.
+
+**Schema changes (SCHEMA_VERSION 11):**
+Add to `Method` node:
+- `io_fanout INT64 DEFAULT 0` — total I/O calls in method body
+- `io_parallel_count INT64 DEFAULT 0`
+- `io_serial_count INT64 DEFAULT 0`
+- `io_parallel_wrapper STRING DEFAULT ''` — dominant wrapper: `coroutine` | `completable_future` | `reactor` | `spring_async` | `""`
+
+**New module:** `orihime/io_fanout_pass.py` — tree-sitter AST pass, mirrors `complexity_pass.py` structure.
+
+**New MCP tool:** `find_io_fanout(repo_name, min_total=2)` — returns entry points ranked by total I/O, with serial/parallel breakdown and optional latency floor if perf data available.
+
+**Sub-steps:**
+- G10.1 — `io_fanout_pass.py`: AST walker for I/O call sites + parallel wrapper detection (Kotlin + Java)
+- G10.2 — `schema.py`: add 4 new Method fields, bump SCHEMA_VERSION 10 → 11
+- G10.3 — `kotlin_extractor.py`: call `detect_io_fanout` and store 4 fields on each method dict
+- G10.4 — `java_extractor.py`: same as G10.3 for Java
+- G10.5 — `indexer.py`: include 4 new fields in Method node batch write
+- G10.6 — `mcp_server.py`: `find_io_fanout` tool — query entry points, join with Endpoint nodes, optionally join with PerfSample for latency floor
+
+**What G10 does NOT do:**
+- Control-flow graph (CFG) — classifying branches and loops requires a full CFG, not just a syntax tree. Tree-sitter gives a CST/AST; CFG construction is a separate ~200h project. G10 counts I/O calls in the method body regardless of which branch they're on. This means `total` is a **ceiling**, not an exact count for every execution path.
+- Dynamic dispatch — if the call goes through an interface (e.g. `userRepository.findById` where `userRepository` is injected), G10 detects it via naming heuristics, not resolved types. Type resolution would require a full type-inference pass (separate work item).
+
+---
+
 ### S8 — Entry-Point Reachability Filtering (~80h)
 
 **What**: Today S4–S7 report every taint path that exists structurally in the code, including paths through dead code and internal-only utilities that are never called from a real entry point. S8 suppresses those false positives.
@@ -171,3 +222,7 @@ MCP tool: `find_license_violations(repo_name, allowed=["MIT","Apache-2.0","BSD-2
 | Malware in dependencies | Requires behavioral sandboxing |
 | Container/OS layer scanning | Trivy/Grype; out of scope |
 | IaC misconfiguration | Checkov/tfsec; Rakuten uses OPA/Kyverno |
+| Control-flow graph (CFG) extraction | Requires full dataflow analysis beyond what tree-sitter's CST provides. Tree-sitter is a parsing library, not a compiler frontend — it does not produce SSA form, dominator trees, or PHI nodes. Implementing a correct CFG pass in Python would be ~200h and would still be less accurate than a JVM bytecode-level tool (e.g. ASM, Soot, or WALA). The G10 `io_fanout` feature deliberately counts I/O calls as a ceiling (all branches) rather than per-path, which is sufficient for the latency budgeting use case without requiring a CFG. |
+| Type-resolved call dispatch | Resolving virtual dispatch (interface → concrete class) without a type inference engine requires either a full type-inference pass or a class hierarchy analysis (CHA). CHA is already partially implemented via the `IMPLEMENTS`/`EXTENDS` edges, but resolving which concrete method a `repository.findById()` call dispatches to at runtime requires propagating type information through the call graph — a compiler-level problem. Current approach: heuristic name matching (method names ending in `Repository`, `Repo`, `Service` etc.) which covers ~90% of Spring Boot patterns correctly. |
+| Branch-level I/O path analysis | Determining exactly which I/O calls fire on a given execution path (e.g. "only called if Phase2 flag is true") requires both CFG extraction and constraint propagation. This is the problem CodeQL and Semgrep solve with full program analysis. Out of scope for a static graph tool; the correct answer for branch-level analysis is to point users at CodeQL. |
+| Runtime call count profiling | Counting actual I/O invocations per request under production load is a runtime concern — belongs in Grafana/Datadog APM, not a static graph tool. G8 (perf ingestion) is the right layer for runtime data: ingest Gatling/JMeter results and correlate with the static graph, rather than trying to derive runtime counts from source. |

@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from orihime.complexity_pass import detect_complexity_hints
+from orihime.io_fanout_pass import detect_io_fanout
 from orihime.language import ExtractResult, register
 
 # ---------------------------------------------------------------------------
@@ -440,6 +441,10 @@ class KotlinExtractor:
                     "generated": True,
                     "is_entry_point": False,
                     "complexity_hint": "",
+                    "io_fanout": 0,
+                    "io_parallel_count": 0,
+                    "io_serial_count": 0,
+                    "io_parallel_wrapper": "",
                 })
 
             # Extract EXTENDS/IMPLEMENTS inheritance edges (class and object only)
@@ -500,6 +505,7 @@ class KotlinExtractor:
                 fn_complexity_hint = detect_complexity_hints(
                     fn_body, src, fn_name, fn_param_names, "kotlin"
                 )
+                fn_io = detect_io_fanout(fn_body, src, "kotlin", fn_annotations)
 
                 method_id = str(uuid.uuid4())
                 methods.append({
@@ -515,6 +521,10 @@ class KotlinExtractor:
                     "generated": generated,
                     "is_entry_point": fn_is_entry_point,
                     "complexity_hint": fn_complexity_hint,
+                    "io_fanout": fn_io["total"],
+                    "io_parallel_count": fn_io["parallel_count"],
+                    "io_serial_count": fn_io["serial_count"],
+                    "io_parallel_wrapper": fn_io["parallel_wrapper"],
                 })
 
                 # Detect endpoint annotations
@@ -596,6 +606,7 @@ class KotlinExtractor:
                 tl_complexity_hint = detect_complexity_hints(
                     tl_fn_body, src, fn_name, tl_param_names, "kotlin"
                 )
+                tl_io = detect_io_fanout(tl_fn_body, src, "kotlin", fn_annotations)
 
                 method_id = str(uuid.uuid4())
                 methods.append({
@@ -611,6 +622,10 @@ class KotlinExtractor:
                     "generated": False,
                     "is_entry_point": tl_is_entry_point,
                     "complexity_hint": tl_complexity_hint,
+                    "io_fanout": tl_io["total"],
+                    "io_parallel_count": tl_io["parallel_count"],
+                    "io_serial_count": tl_io["serial_count"],
+                    "io_parallel_wrapper": tl_io["parallel_wrapper"],
                 })
 
                 # Detect RestClient / WebClient calls in top-level function body

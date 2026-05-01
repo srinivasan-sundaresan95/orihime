@@ -1700,6 +1700,124 @@ def find_complexity_hints(repo_name: str, min_severity: str = "medium") -> list[
 
 
 # ---------------------------------------------------------------------------
+# G10 Tool: find_io_fanout
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_io_fanout(repo_name: str, min_total: int = 2) -> list[dict]:
+    """Return entry-point methods ranked by I/O call count, with serial/parallel breakdown.
+
+    For each HTTP/Kafka/Scheduled entry point, reports the total number of I/O
+    operations (DB + HTTP + cache) detectable in its method body, split into
+    serial (latency adds) and parallel (latency = max of group).
+
+    If perf data has been ingested via ingest_perf_results, also estimates
+    latency_floor_ms = sum(serial p99s) + max(parallel p99s).
+
+    Args:
+        repo_name: Repository to query.
+        min_total: Only return methods with at least this many I/O calls (default 2).
+
+    Returns:
+        List of dicts: endpoint_path, http_method, handler_fqn, file_path,
+        line_start, total_io, serial_io, parallel_io, parallel_wrapper, latency_floor_ms.
+        Sorted by total_io descending.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return []
+    try:
+        # 1. Resolve repo_id
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        # 2. Query all methods with io_fanout >= min_total, regardless of entry_point flag
+        r_m = conn.execute(
+            "MATCH (m:Method) WHERE "
+            "m.repo_id = $rid AND m.io_fanout >= $min_total "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.id, m.fqn, m.line_start, m.io_fanout, "
+            "m.io_serial_count, m.io_parallel_count, m.io_parallel_wrapper, f.path",
+            {"rid": repo_id, "min_total": min_total},
+        )
+        methods_raw = _rows(
+            r_m,
+            [
+                "method_id", "handler_fqn", "line_start", "total_io",
+                "serial_io", "parallel_io", "parallel_wrapper", "file_path",
+            ],
+        )
+
+        if not methods_raw:
+            return []
+
+        # 3. For each method, look up its Endpoint node
+        results: list[dict] = []
+        for row in methods_raw:
+            mid = row["method_id"]
+            endpoint_path = ""
+            http_method_str = ""
+
+            r_ep = conn.execute(
+                "MATCH (e:Endpoint) WHERE e.handler_method_id = $mid RETURN e.path, e.http_method",
+                {"mid": mid},
+            )
+            if r_ep.has_next():
+                ep_row = r_ep.get_next()
+                endpoint_path = ep_row[0] or ""
+                http_method_str = ep_row[1] or ""
+
+            # 4. Try to compute latency_floor_ms via PerfSample OBSERVED_AT edges
+            latency_floor_ms = None
+            r_perf = conn.execute(
+                "MATCH (m:Method)-[:OBSERVED_AT]->(ps:PerfSample) "
+                "WHERE m.id = $mid RETURN ps.p99_ms",
+                {"mid": mid},
+            )
+            perf_samples: list[float] = []
+            while r_perf.has_next():
+                p99 = r_perf.get_next()[0]
+                if p99 is not None:
+                    perf_samples.append(float(p99))
+
+            if perf_samples:
+                serial_count = row["serial_io"] or 0
+                parallel_count = row["parallel_io"] or 0
+                total_io = row["total_io"] or 0
+                if total_io > 0 and perf_samples:
+                    # Distribute p99 samples proportionally
+                    # serial_floor = sum of serial p99s (estimate: avg p99 * serial_count)
+                    avg_p99 = sum(perf_samples) / len(perf_samples)
+                    serial_floor = avg_p99 * serial_count
+                    parallel_floor = avg_p99 if parallel_count > 0 else 0.0
+                    latency_floor_ms = serial_floor + parallel_floor
+
+            results.append({
+                "endpoint_path": endpoint_path,
+                "http_method": http_method_str,
+                "handler_fqn": row["handler_fqn"],
+                "file_path": row["file_path"],
+                "line_start": row["line_start"],
+                "total_io": row["total_io"],
+                "serial_io": row["serial_io"],
+                "parallel_io": row["parallel_io"],
+                "parallel_wrapper": row["parallel_wrapper"],
+                "latency_floor_ms": latency_floor_ms,
+            })
+
+        results.sort(key=lambda x: x["total_io"] or 0, reverse=True)
+        return results
+    except Exception as exc:
+        log.error("find_io_fanout(%r): %s", repo_name, exc)
+        return [{"error": str(exc)}]
+
+
+# ---------------------------------------------------------------------------
 # G8 Tool 1: ingest_perf_results
 # ---------------------------------------------------------------------------
 

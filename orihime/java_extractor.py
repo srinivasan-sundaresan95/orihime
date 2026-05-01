@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .complexity_pass import detect_complexity_hints
+from .io_fanout_pass import detect_io_fanout
 from .language import ExtractResult, register
 from .path_utils import compile_path_regex
 
@@ -788,6 +789,10 @@ class JavaExtractor:
                     "generated": True,
                     "is_entry_point": False,
                     "complexity_hint": "",
+                    "io_fanout": 0,
+                    "io_parallel_count": 0,
+                    "io_serial_count": 0,
+                    "io_parallel_wrapper": "",
                 }
             )
 
@@ -905,6 +910,7 @@ class JavaExtractor:
         complexity_hint = detect_complexity_hints(
             body_node, source_bytes, method_name, param_names, "java"
         )
+        io_fanout_result = detect_io_fanout(body_node, source_bytes, "java", annotations)
 
         method_id = str(uuid.uuid4())
         result.methods.append(
@@ -921,6 +927,10 @@ class JavaExtractor:
                 "generated": generated,
                 "is_entry_point": is_entry_point,
                 "complexity_hint": complexity_hint,
+                "io_fanout": io_fanout_result["total"],
+                "io_parallel_count": io_fanout_result["parallel_count"],
+                "io_serial_count": io_fanout_result["serial_count"],
+                "io_parallel_wrapper": io_fanout_result["parallel_wrapper"],
             }
         )
 
