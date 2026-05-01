@@ -75,26 +75,33 @@ No source file reads. No grep. Claude uses the graph directly — typically 5–
 
 ## Feature Comparison
 
-| Capability | Orihime | GitNexus | SonarQube Community | SonarQube Enterprise |
-|---|---|---|---|---|
-| Cross-repo call graph | ✓ | ✓ | ✗ | ✗ |
-| REST endpoint resolution | ✓ | ✓ | ✗ | ✗ |
-| MCP integration (AI assistants) | ✓ | ✗ | ✗ | ✗ |
-| Cross-file taint (SAST) | ✓ | ✗ | ✓ | ✓ |
-| Second-order injection | ✓ | ✗ | ✗ | ✗ |
-| Entry-point reachability filter | ✓ | ✗ | ✗ | ✗ |
-| Custom sources/sinks (YAML) | ✓ | ✗ | ✗ | ✓ |
-| OWASP/CWE/PCI/STIG reports | ✓ | ✗ | ✗ | ✓ |
-| Argument-level taint (value-flow) | ✓ | ✗ | ✗ | ✗ |
-| Complexity hints (O(n²), N+1) | ✓ | ✗ | partial | partial |
-| Perf ingestion + capacity model | ✓ | ✗ | ✗ | ✗ |
-| Cross-service cascade risk | ✓ | ✗ | ✗ | ✗ |
-| License compliance | ✓ | ✗ | ✗ | ✓ |
-| Embedded DB (no server daemon) | ✓ | ✓ | N/A | N/A |
-| Local web UI | ✓ | ✓ | ✓ | ✓ |
-| Language | Python (MIT) | TypeScript (PolyForm NC) | Java (LGPL) | Java (Commercial) |
+| Capability | Orihime | GitNexus | SonarQube Community | SonarQube Developer | SonarQube Enterprise |
+|---|---|---|---|---|---|
+| Cross-repo call graph | ✓ | ✓ | ✗ | ✗ | ✗ |
+| REST endpoint resolution | ✓ | ✓ | ✗ | ✗ | ✗ |
+| MCP integration (AI assistants) | ✓ | ✓ | ✓¹ | ✓¹ | ✓¹ |
+| Claude Code hooks + skills | ✓ | ✓ | ✗ | ✗ | ✗ |
+| Cross-file taint (SAST / injection) | ✓ | ✗ | ✗ | ✓ | ✓ |
+| Second-order injection | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Entry-point reachability filter | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Custom sources/sinks (YAML) | ✓ | ✗ | ✗ | ✗ | ✓² |
+| OWASP/CWE/PCI/STIG compliance reports | ✓ | ✗ | ✗ | ✗ | ✓ |
+| Argument-level taint (value-flow) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Complexity hints (O(n²), N+1) | ✓ | ✗ | partial | partial | partial |
+| I/O fan-out + serial/parallel analysis | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Perf ingestion + capacity model | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Cross-service cascade risk | ✓ | ✗ | ✗ | ✗ | ✗ |
+| License compliance | ✓ | ✗ | ✗ | ✗ | ✓³ |
+| Embedded DB (no server daemon) | ✓ | ✓ | ✗ | ✗ | ✗ |
+| Indexes Java / Kotlin | ✓ | ✗ | ✓ | ✓ | ✓ |
+| Indexes JS / TS | ✓ | ✓ | ✓ | ✓ | ✓ |
+| License | MIT | PolyForm NC | LGPL | Commercial | Commercial |
 
-> GitNexus provides similar call-graph and endpoint resolution but is licensed under PolyForm Non-Commercial, which prohibits use in commercial settings. Orihime is MIT-licensed and unrestricted. It also adds a full SAST/taint pipeline, MCP integration, and perf correlation that GitNexus does not have.
+> ¹ Via the official [sonarqube-mcp-server](https://github.com/SonarSource/sonarqube-mcp-server) (SonarSource, production-ready). Works with all SonarQube editions.
+> ² Custom taint sources/sinks require the Advanced Security add-on (Enterprise+).
+> ³ License compliance (SBOM + policy enforcement) requires the Advanced Security add-on (Enterprise+).
+>
+> **GitNexus** (PolyForm Non-Commercial) provides cross-repo call graphs and MCP integration but indexes only JavaScript/TypeScript. It does not cover Java/Kotlin codebases, SAST, or perf analysis.
 
 ---
 
@@ -322,6 +329,8 @@ Batch write speedup vs naive per-row writes: **12×**.
 
 Measured on a real 928-file Java/Kotlin service, tracing one controller endpoint through service → repositories → upstream APIs.
 
+> **Note**: All three baseline/GitNexus/Orihime rows reflect the same Java/Kotlin codebase. GitNexus cannot be directly benchmarked on this codebase — see footnote.
+
 | Approach | Wall time | Tool calls | Tokens | Files read |
 |---|---|---|---|---|
 | **Baseline** — Claude reads source files directly | ~4–5 min | 36 | ~84,000 | 27 |
@@ -332,7 +341,7 @@ Measured on a real 928-file Java/Kotlin service, tracing one controller endpoint
 
 The 7 Orihime tool calls produced ~80% of the structural picture (full controller→service→repo→upstream chain, 27 test methods surfaced, resilience wiring discovered automatically). The remaining ~20% — upstream API URLs, auth headers, branch-level control flow — still requires targeted source reads, but now scoped to ~5 specific files rather than 27.
 
-> ¹ GitNexus indexes JavaScript/TypeScript only. The benchmark codebase is Java/Kotlin, so GitNexus cannot be applied. For JS/TS codebases, Orihime also supports JS/TS indexing via `tree-sitter-javascript`/`tree-sitter-typescript`.
+> ¹ GitNexus indexes JavaScript/TypeScript codebases only and cannot index Java/Kotlin. The benchmark codebase is Java/Kotlin, making a direct comparison impossible. For JS/TS codebases, both tools provide MCP-based call graph queries; Orihime additionally provides SAST, security reports, complexity hints, and perf analysis that GitNexus does not.
 
 ---
 
