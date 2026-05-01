@@ -4,13 +4,37 @@ description: >
   Use when the user asks for a code review focused on class structure, design patterns,
   OOP principles, or architecture quality. Reviews whether GoF/SOLID design patterns
   are properly applied, flags misapplications and missing patterns, suggests splitting
-  bloated classes/methods, and recommends fortifying weak abstractions. Queries Orihime
-  graph first to build the structural picture, then reads targeted source files.
+  bloated classes/methods, and recommends fortifying weak abstractions. Can scope to
+  the latest git changes only (PR review mode) or review the full repository.
+  Queries Orihime graph first to build the structural picture, then reads targeted source.
   Trigger phrases: "review the design", "check class structure", "design patterns",
-  "is this SOLID", "should I split this", "code review", "OOP review", "architecture review".
+  "is this SOLID", "should I split this", "code review", "OOP review", "architecture review",
+  "review my PR", "review these changes".
 ---
 
 # Orihime Design Review Skill
+
+## Scope selection — ALWAYS decide this first
+
+Before doing anything else, determine the review scope:
+
+**Changed-files mode** (default for PR/branch reviews):
+- User says "review my PR", "review these changes", "review what I just wrote", or is on a feature branch
+- Run: `Bash("git diff --name-only main...HEAD")` or `git diff --name-only HEAD~1`
+- Extract the changed class/method names from the diff
+- Feed those specific FQNs into the graph analysis below — ignore everything else
+
+**Full-repo mode** (explicit request or no branch context):
+- User says "review the design of repo X", "audit the whole codebase", "full design review"
+- Use `search_symbol` broadly and `find_complexity_hints` across the whole repo
+- Prioritise by blast radius and complexity hint count
+
+**Mixed mode** (changed files + their neighbourhood):
+- User says "review these changes in context" or "check if my changes fit the existing design"
+- Start with changed files (as above), then expand to their direct callers/callees via the graph
+- This is the most useful mode for PR reviews — sees both what changed AND what it affects
+
+When in doubt, ask: "Review just the changed files, or the full repo?"
 
 ## Trigger conditions
 
@@ -23,6 +47,23 @@ description: >
 - "How is [pattern] implemented in [repo]?"
 - "Is this a good abstraction?"
 - Any PR review or code review request against an indexed repo
+
+---
+
+## Phase 0 — Extract changed classes (changed-files mode only)
+
+```bash
+git diff --name-only main...HEAD          # files changed vs main
+git diff --name-only HEAD~1               # files changed in last commit
+git diff --name-only --cached             # staged files
+```
+
+From the changed file paths, derive the class names and FQNs:
+- `src/main/kotlin/com/example/service/OrderService.kt` → `com.example.service.OrderService`
+- Use `mcp__orihime__search_symbol(query="OrderService")` to confirm the FQN and get the graph node
+
+Only the classes in the changed files enter the Phase 1 analysis.
+Their callers and callees from the graph form the "neighbourhood" for mixed mode.
 
 ---
 
