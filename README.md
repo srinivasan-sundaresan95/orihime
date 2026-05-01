@@ -32,31 +32,21 @@ cd orihime
 pip install -e .
 ```
 
-### 2. Index your repositories
+### 2. Register with Claude Code (one-time setup)
+
+```bash
+python -m orihime register       # writes MCP server entry to ~/.claude/settings.json
+python -m orihime install-skills # copies Claude Code skills to ~/.claude/skills/
+```
+
+Restart Claude Code. The `orihime` MCP tools and skills (`/orihime-call-flow`, `/orihime-security-audit`, `/orihime-perf-analysis`, `/orihime-change-impact`) are now active.
+
+### 3. Index your repositories
 
 ```bash
 python -m orihime index --repo /path/to/your/service-a --name service-a
 python -m orihime index --repo /path/to/your/service-b --name service-b
 ```
-
-### 3. Register with Claude Code
-
-Add to `~/.claude/settings.json` (or your MCP client's config):
-
-```json
-{
-  "mcpServers": {
-    "orihime": {
-      "command": "python3",
-      "args": ["-m", "orihime", "serve"],
-      "cwd": "/path/to/orihime",
-      "env": { "ORIHIME_DB_PATH": "/home/user/.orihime/orihime.db" }
-    }
-  }
-}
-```
-
-Restart Claude Code. The `orihime` MCP tools are now available.
 
 ### 4. Ask questions
 
@@ -183,8 +173,10 @@ All operations are also accessible directly without an AI assistant:
 python -m orihime index        --repo PATH  --name NAME  [--db PATH] [--force] [--branch NAME]
 python -m orihime ui           [--port 7700] [--db PATH]
 python -m orihime serve
-python -m orihime resolve      [--db PATH]
-python -m orihime write-server [--port 7701] [--db PATH]
+python -m orihime resolve        [--db PATH]
+python -m orihime write-server   [--port 7701] [--db PATH]
+python -m orihime register       [--db PATH] [--python PATH]
+python -m orihime install-skills
 ```
 
 | Command | Description |
@@ -194,6 +186,8 @@ python -m orihime write-server [--port 7701] [--db PATH]
 | `serve` | Start the MCP server on stdio (for Claude Code, Claude Desktop, any MCP client) |
 | `resolve` | Match RestCall URL patterns against Endpoints across all indexed repos |
 | `write-server` | Start the write-serialization server for team/server deployments |
+| `register` | Write the Orihime MCP server entry to `~/.claude/settings.json` |
+| `install-skills` | Copy bundled Claude Code skills to `~/.claude/skills/` |
 
 ---
 

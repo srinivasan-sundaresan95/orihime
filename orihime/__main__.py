@@ -2,13 +2,72 @@
 # python -m orihime serve
 # python -m orihime ui [--port 7700] [--db ~/.orihime/orihime.db]
 # python -m orihime resolve [--db ~/.orihime/orihime.db]
+# python -m orihime install-skills
+# python -m orihime register
 import argparse
+import json
+import shutil
 import sys
 from pathlib import Path
 
 from orihime.indexer import index_repo
 
 _DEFAULT_DB_PATH = str(Path.home() / ".orihime" / "orihime.db")
+
+
+def _install_skills() -> None:
+    """Copy bundled Claude Code skills into ~/.claude/skills/."""
+    src_root = Path(__file__).parent / "skills"
+    dst_root = Path.home() / ".claude" / "skills"
+
+    if not src_root.exists():
+        print("ERROR: skills directory not found in the Orihime package.")
+        sys.exit(1)
+
+    dst_root.mkdir(parents=True, exist_ok=True)
+    installed = []
+    for skill_dir in sorted(src_root.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        dst = dst_root / skill_dir.name
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(skill_dir, dst)
+        installed.append(skill_dir.name)
+
+    print(f"Installed {len(installed)} skill(s) to {dst_root}:")
+    for name in installed:
+        print(f"  /{name}")
+    print("\nRestart Claude Code to activate.")
+
+
+def _register_mcp(db_path: str, python: str) -> None:
+    """Add or update the orihime MCP server entry in ~/.claude/settings.json."""
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            print(f"WARNING: could not parse {settings_path} — will overwrite mcpServers only.")
+
+    orihime_root = str(Path(__file__).parent.parent.resolve())
+    settings.setdefault("mcpServers", {})["orihime"] = {
+        "type": "stdio",
+        "command": python,
+        "args": ["-m", "orihime", "serve"],
+        "cwd": orihime_root,
+        "env": {"ORIHIME_DB_PATH": db_path},
+    }
+
+    settings_path.write_text(json.dumps(settings, indent=2))
+    print(f"Registered Orihime MCP server in {settings_path}")
+    print(f"  python:  {python}")
+    print(f"  cwd:     {orihime_root}")
+    print(f"  db:      {db_path}")
+    print("\nRestart Claude Code to connect.")
 
 
 def main() -> None:
@@ -64,6 +123,28 @@ def main() -> None:
         help="Path to the KuzuDB database file (default: ~/.orihime/orihime.db)",
     )
 
+    # ---- install-skills ----
+    subparsers.add_parser(
+        "install-skills",
+        help="Install Orihime Claude Code skills into ~/.claude/skills/",
+    )
+
+    # ---- register ----
+    register_parser = subparsers.add_parser(
+        "register",
+        help="Register the Orihime MCP server in ~/.claude/settings.json",
+    )
+    register_parser.add_argument(
+        "--db",
+        default=_DEFAULT_DB_PATH,
+        help="Path to the KuzuDB database file (default: ~/.orihime/orihime.db)",
+    )
+    register_parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="Python interpreter to use (default: current interpreter)",
+    )
+
     # ---- write-server ----
     ws_parser = subparsers.add_parser(
         "write-server",
@@ -111,6 +192,14 @@ def main() -> None:
             print(f"  {k}: {v}")
         if skipped:
             print(f"  files_skipped (unchanged): {skipped}")
+        return
+
+    if args.command == "install-skills":
+        _install_skills()
+        return
+
+    if args.command == "register":
+        _register_mcp(args.db, args.python)
         return
 
     if args.command == "write-server":
