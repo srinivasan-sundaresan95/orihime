@@ -1,6 +1,6 @@
 # Orihime
 
-A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript codebases. Orihime indexes your source code into an embedded [KuzuDB](https://kuzudb.com/) graph database using [tree-sitter](https://tree-sitter.github.io/) and exposes the graph through an MCP server, a CLI, and a local web UI.
+A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript codebases. Orihime indexes your source code into an embedded [KuzuDB](https://kuzudb.com/) graph database using [tree-sitter](https://tree-sitter.github.io/) and exposes the graph through an **MCP server** (for AI assistants), a local web UI, and a CLI.
 
 > **Mythology**: Orihime (織姫) is Vega — the weaving princess who weaves the fabric of the cosmos. She weaves connections. The tool that weaves your codebase into a single graph.
 
@@ -11,7 +11,7 @@ A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript co
 - **Call graph across repositories** — who calls what, across service boundaries, including REST calls resolved to the endpoint they target
 - **Cross-repo taint analysis** — track user-controlled data from HTTP/Kafka/JMS entry points through the call graph to dangerous sinks (SQL injection, path traversal, XXE, deserialization, SSRF, log injection, …)
 - **Security reports** — OWASP Top 10, CWE, PCI DSS, STIG frameworks; second-order injection detection; custom sources/sinks via YAML
-- **Entry-point reachability filtering** — suppress false positives from dead code; only surface findings reachable from real entry points (HTTP handlers, @KafkaListener, @Scheduled, @JmsListener, @RabbitListener)
+- **Entry-point reachability filtering** — suppress false positives from dead code; only surface findings reachable from real entry points (HTTP handlers, `@KafkaListener`, `@Scheduled`, `@JmsListener`, `@RabbitListener`)
 - **Complexity hints** — static O(n²) loop detection, N+1 JPA risk, unbounded queries, recursive calls — no profiler needed
 - **Performance correlation** — ingest Gatling/JMeter load test results; correlate with the call graph to find confirmed hotspots and Little's Law capacity ceilings per endpoint
 - **License compliance** — scan Maven/Gradle dependencies against SPDX identifiers; flag GPL/AGPL/LGPL in commercial projects
@@ -20,83 +20,28 @@ A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript co
 
 ---
 
-## Quick Start
+## Quick Start — AI-first (Claude Code)
+
+The primary way to use Orihime is through an AI assistant via MCP. You index once, then ask questions in natural language — no Cypher, no grep, no reading source files.
+
+### 1. Install
 
 ```bash
-# Install
+git clone https://github.com/srinivasan-sundaresan95/orihime.git
+cd orihime
 pip install -e .
-
-# Index a repository
-python -m orihime index --repo /path/to/your/repo --name my-service
-
-# Start the web UI
-python -m orihime ui          # http://localhost:7700
-
-# Start the MCP server (for Claude / any MCP client)
-python -m orihime serve
 ```
 
-### Prerequisites
-
-- Python 3.11+
-- `pip install kuzu tree-sitter fastmcp fastapi uvicorn`
-
----
-
-## CLI Reference
-
-```
-python -m orihime index  --repo PATH  --name NAME  [--db PATH] [--force] [--branch NAME]
-python -m orihime ui     [--port 7700] [--db PATH]
-python -m orihime serve
-python -m orihime resolve  [--db PATH]
-python -m orihime write-server  [--port 7701] [--db PATH]
-```
-
-| Command | Description |
-|---|---|
-| `index` | Parse a repository and write its graph into KuzuDB |
-| `ui` | Start the local web UI on port 7700 |
-| `serve` | Start the MCP server on stdio (for Claude Code, Claude Desktop) |
-| `resolve` | Match RestCall URL patterns against Endpoints across all indexed repos |
-| `write-server` | Start the write-serialization server for team/server deployments |
-
-### Incremental Re-index
-
-By default, `index` skips any file whose git blob hash matches the stored hash. Pass `--force` to re-parse everything.
-
-### Branch Support
+### 2. Index your repositories
 
 ```bash
-python -m orihime index --repo /path --name my-service --branch feature/my-branch
+python -m orihime index --repo /path/to/your/service-a --name service-a
+python -m orihime index --repo /path/to/your/service-b --name service-b
 ```
 
-Graph nodes are tagged with `branch_name` for multi-branch analysis.
+### 3. Register with Claude Code
 
----
-
-## Web UI
-
-```
-http://localhost:7700
-```
-
-| Page | Description |
-|---|---|
-| `/` | Call graph explorer: search methods, trace callers/callees, visualize CALLS graph |
-| `/findings` | Security + complexity findings table — filter by OWASP category, severity, file |
-| `/api/…` | JSON endpoints backing the UI (also usable directly) |
-
-The Findings page aggregates:
-- Taint sinks reachable from entry points (SQL injection, path traversal, XXE, …)
-- Complexity hints (O(n²) loops, N+1 risk, unbounded queries)
-- OWASP category, CWE ID, file, line number, severity per finding
-
----
-
-## MCP Tools
-
-Connect Claude Code (or any MCP client) to the Orihime MCP server with:
+Add to `~/.claude/settings.json` (or your MCP client's config):
 
 ```json
 {
@@ -104,12 +49,56 @@ Connect Claude Code (or any MCP client) to the Orihime MCP server with:
     "orihime": {
       "command": "python3",
       "args": ["-m", "orihime", "serve"],
-      "cwd": "/path/to/indra",
+      "cwd": "/path/to/orihime",
       "env": { "ORIHIME_DB_PATH": "/home/user/.orihime/orihime.db" }
     }
   }
 }
 ```
+
+Restart Claude Code. The `orihime` MCP tools are now available.
+
+### 4. Ask questions
+
+```
+Trace the call flow for GET /api/orders in service-a
+Find SQL injection risks in service-b
+What breaks if I change OrderService.processPayment?
+Which endpoints are approaching saturation?
+```
+
+No source file reads. No grep. Claude uses the graph directly — typically 5–8 tool calls vs 30+ for source-only analysis.
+
+> **CLI alternative**: All operations above are also available as Python commands (`python -m orihime index`, `python -m orihime ui`, etc.) if you prefer working outside an AI assistant. See [CLI Reference](#cli-reference) below.
+
+---
+
+## Feature Comparison
+
+| Capability | Orihime | GitNexus | SonarQube Community | SonarQube Enterprise |
+|---|---|---|---|---|
+| Cross-repo call graph | ✓ | ✓ | ✗ | ✗ |
+| REST endpoint resolution | ✓ | ✓ | ✗ | ✗ |
+| MCP integration (AI assistants) | ✓ | ✗ | ✗ | ✗ |
+| Cross-file taint (SAST) | ✓ | ✗ | ✓ | ✓ |
+| Second-order injection | ✓ | ✗ | ✗ | ✗ |
+| Entry-point reachability filter | ✓ | ✗ | ✗ | ✗ |
+| Custom sources/sinks (YAML) | ✓ | ✗ | ✗ | ✓ |
+| OWASP/CWE/PCI/STIG reports | ✓ | ✗ | ✗ | ✓ |
+| Argument-level taint (value-flow) | ✓ | ✗ | ✗ | ✗ |
+| Complexity hints (O(n²), N+1) | ✓ | ✗ | partial | partial |
+| Perf ingestion + capacity model | ✓ | ✗ | ✗ | ✗ |
+| Cross-service cascade risk | ✓ | ✗ | ✗ | ✗ |
+| License compliance | ✓ | ✗ | ✗ | ✓ |
+| Embedded DB (no server daemon) | ✓ | ✓ | N/A | N/A |
+| Local web UI | ✓ | ✓ | ✓ | ✓ |
+| Language | Python (MIT) | TypeScript (PolyForm NC) | Java (LGPL) | Java (Commercial) |
+
+> GitNexus provides similar call-graph and endpoint resolution but is licensed under PolyForm Non-Commercial, which prohibits use in commercial settings. Orihime is MIT-licensed and unrestricted. It also adds a full SAST/taint pipeline, MCP integration, and perf correlation that GitNexus does not have.
+
+---
+
+## MCP Tools Reference
 
 ### Call Graph
 
@@ -142,12 +131,12 @@ Connect Claude Code (or any MCP client) to the Orihime MCP server with:
 | `list_entity_relations(repo_name)` | All JPA entity relationships |
 | `find_eager_fetches(repo_name)` | EAGER-fetched collections (N+1 risk) |
 
-### Security (S4–S8)
+### Security (SAST)
 
 | Tool | Description |
 |---|---|
 | `find_taint_sinks(repo_name)` | All taint sinks reachable in the call graph |
-| `find_taint_flows(repo_name)` | Value-flow taint: argument position → parameter position across CALLS edges |
+| `find_taint_flows(repo_name)` | Value-flow taint: argument → parameter across CALLS edges |
 | `find_cross_service_taint(repo_name, max_depth)` | Taint that crosses service boundaries via REST |
 | `find_second_order_injection(repo_name)` | Taint stored to DB then re-read and used as sink |
 | `find_entry_points(repo_name)` | All HTTP/Kafka/Scheduled/JMS/RabbitMQ entry points |
@@ -155,27 +144,63 @@ Connect Claude Code (or any MCP client) to the Orihime MCP server with:
 | `generate_security_report(repo_name, framework)` | Report in OWASP / CWE / PCI / STIG format |
 | `list_security_config()` | Show active sources, sinks, and sanitizers from YAML config |
 
-### Complexity & Performance (G7–G8)
+### Complexity & Performance
 
 | Tool | Description |
 |---|---|
-| `find_complexity_hints(repo_name, min_severity)` | Methods flagged with O(n²)-candidate, n+1-risk, unbounded-query, recursive |
+| `find_complexity_hints(repo_name, min_severity)` | Methods flagged with O(n²), N+1, unbounded-query, recursive |
 | `ingest_perf_results(repo_name, file_path)` | Load Gatling simulation.log, JMeter XML, or JSON perf data |
 | `find_hotspots(repo_name)` | Complexity hints × p99 latency, sorted by risk score |
 | `estimate_capacity(repo_name)` | Little's Law capacity per endpoint; flags near-saturation |
 | `find_cascade_risk(repo_name)` | Cross-service cascade: upstream endpoints limited by downstream saturation |
 
-### License Compliance (S11)
+### License Compliance
 
 | Tool | Description |
 |---|---|
-| `find_license_violations(repo_name, allowed, skip_lookup)` | Flag GPL/AGPL/LGPL dependencies; lookup via Maven Central |
+| `find_license_violations(repo_name, allowed, skip_lookup)` | Flag GPL/AGPL/LGPL dependencies via Maven Central |
 
 ### Index
 
 | Tool | Description |
 |---|---|
 | `index_repo_tool(repo_path, repo_name)` | Trigger an index from within the MCP session |
+
+---
+
+## CLI Reference
+
+All operations are also accessible directly without an AI assistant:
+
+```
+python -m orihime index        --repo PATH  --name NAME  [--db PATH] [--force] [--branch NAME]
+python -m orihime ui           [--port 7700] [--db PATH]
+python -m orihime serve
+python -m orihime resolve      [--db PATH]
+python -m orihime write-server [--port 7701] [--db PATH]
+```
+
+| Command | Description |
+|---|---|
+| `index` | Parse a repository and write its graph into KuzuDB |
+| `ui` | Start the local web UI on port 7700 |
+| `serve` | Start the MCP server on stdio (for Claude Code, Claude Desktop, any MCP client) |
+| `resolve` | Match RestCall URL patterns against Endpoints across all indexed repos |
+| `write-server` | Start the write-serialization server for team/server deployments |
+
+---
+
+## Web UI
+
+```
+http://localhost:7700
+```
+
+| Page | Description |
+|---|---|
+| `/` | Call graph explorer: search methods, trace callers/callees, visualize CALLS graph |
+| `/findings` | Security + complexity findings table — filter by OWASP category, severity, file |
+| `/api/…` | JSON endpoints backing the UI (also usable directly) |
 
 ---
 
@@ -210,7 +235,7 @@ The built-in config covers `HttpServletRequest`, `@RequestParam`, `@PathVariable
 
 ---
 
-## Team / Server Mode (G5 Fix-C)
+## Team / Server Mode
 
 KuzuDB has a single-writer constraint. In team deployments where multiple developers re-index simultaneously, run the write-serialization server:
 
@@ -222,9 +247,7 @@ python -m orihime write-server --port 7701 --db /shared/orihime.db
 ORIHIME_SERVER_URL=http://server:7701 python -m orihime index --repo /path --name my-service
 ```
 
-Developers running locally do not set `ORIHIME_SERVER_URL` — they open KuzuDB directly as always.
-
-The web UI and MCP server always read directly from KuzuDB (reads do not go through the write server).
+Developers running locally without `ORIHIME_SERVER_URL` open KuzuDB directly as always. The web UI and MCP server always read directly from KuzuDB (reads do not go through the write server).
 
 ---
 
@@ -279,7 +302,7 @@ KuzuDB embedded graph  ←──────────────────
 
 ## Performance
 
-Benchmarked on `pointclubapp-api` (845 Java/Kotlin files):
+Benchmarked on an 845-file Java/Kotlin service:
 
 | Operation | Time |
 |---|---|
@@ -289,43 +312,7 @@ Benchmarked on `pointclubapp-api` (845 Java/Kotlin files):
 | `blast_radius` (depth 3) | <15ms |
 | `find_taint_sinks` (full repo) | <25ms |
 
-Batch write speedup vs naive per-row writes: **12×** (G5 Fix-A).
-
----
-
-## Feature Comparison
-
-| Capability | Orihime | SonarQube Community | SonarQube Enterprise |
-|---|---|---|---|
-| Cross-file taint (SAST) | ✓ | ✓ | ✓ |
-| Custom sources/sinks | ✓ (YAML) | ✗ | ✓ |
-| Second-order injection | ✓ | ✗ | ✗ |
-| OWASP/CWE/PCI/STIG reports | ✓ | ✗ | ✓ |
-| Entry-point reachability filter | ✓ | ✗ | ✗ |
-| Complexity hints (O(n²), N+1) | ✓ | partial | partial |
-| Perf ingestion + capacity model | ✓ | ✗ | ✗ |
-| Cross-repo call graph | ✓ | ✗ | ✗ |
-| REST endpoint resolution | ✓ | ✗ | ✗ |
-| License compliance | ✓ | ✗ | ✓ |
-| Argument-level taint (G2) | ✓ | ✗ | ✗ |
-| MCP integration (Claude) | ✓ | ✗ | ✗ |
-| Embedded DB (no server daemon) | ✓ | N/A | N/A |
-| License | MIT | LGPL | Commercial |
-
----
-
-## Platform Context
-
-Orihime is the **code-structure explanation layer** in a wider observability platform:
-
-| Project | Role |
-|---|---|
-| **Orihime** (this repo) | Code knowledge graph — what the code does structurally |
-| **Styx** | SLI aggregator — what the running system is doing right now |
-| **Sibyl** | Daily early-warning: Styx yesterday × Orihime → performance risk report |
-| **Charon** | Incident analyzer: PagerDuty alert × Styx × Kibana × Orihime → correlated root-cause |
-
-Orihime is deliberately free of Rakuten-specific integrations so it can be open-sourced. Sibyl and Charon are separate projects.
+Batch write speedup vs naive per-row writes: **12×**.
 
 ---
 
