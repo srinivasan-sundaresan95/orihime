@@ -327,21 +327,33 @@ Batch write speedup vs naive per-row writes: **12×**.
 
 ### AI assistant benchmark — tracing a single call flow
 
-Measured on a real 928-file Java/Kotlin service, tracing one controller endpoint through service → repositories → upstream APIs.
+#### Java/Kotlin codebase (928 files)
 
-> **Note**: All three baseline/GitNexus/Orihime rows reflect the same Java/Kotlin codebase. GitNexus cannot be directly benchmarked on this codebase — see footnote.
+Measured on a real 928-file Java/Kotlin service, tracing one controller endpoint through service → repositories → upstream APIs.
 
 | Approach | Wall time | Tool calls | Tokens | Files read |
 |---|---|---|---|---|
 | **Baseline** — Claude reads source files directly | ~4–5 min | 36 | ~84,000 | 27 |
-| **GitNexus** (JS/TS, MCP) | not applicable¹ | — | — | — |
-| **Orihime** (Python, MCP) | **~4 sec** | **7** | **~8,000** | **0** |
+| **GitNexus** | cannot index Java/Kotlin | — | — | — |
+| **Orihime** | **~4 sec** | **7** | **~8,000** | **0** |
 
-**Reduction vs baseline: 98% fewer tokens · 80% fewer tool calls · 60× faster**
+**Orihime vs baseline: 98% fewer tokens · 80% fewer tool calls · 60× faster**
 
 The 7 Orihime tool calls produced ~80% of the structural picture (full controller→service→repo→upstream chain, 27 test methods surfaced, resilience wiring discovered automatically). The remaining ~20% — upstream API URLs, auth headers, branch-level control flow — still requires targeted source reads, but now scoped to ~5 specific files rather than 27.
 
-> ¹ GitNexus indexes JavaScript/TypeScript codebases only and cannot index Java/Kotlin. The benchmark codebase is Java/Kotlin, making a direct comparison impossible. For JS/TS codebases, both tools provide MCP-based call graph queries; Orihime additionally provides SAST, security reports, complexity hints, and perf analysis that GitNexus does not.
+---
+
+#### JS/TS codebase — architecture comparison
+
+GitNexus supports JavaScript/TypeScript only. A direct JS/TS benchmark has not been run yet; the numbers below are **not measured** and will be filled in once benchmarked. What the architecture implies:
+
+| Approach | Tool calls (est.) | Scope |
+|---|---|---|
+| **Baseline** — Claude reads source files directly | ~30–40 | Call chain only |
+| **GitNexus MCP** | ~5–10 | Call chain + endpoint resolution |
+| **Orihime MCP** | ~5–10 | Call chain + endpoint resolution + SAST + complexity + perf |
+
+Both GitNexus and Orihime use the same MCP mechanism (stdio, graph DB queries) so raw tool-call and token counts for a pure call-chain trace should be comparable on JS/TS. The difference is what else Orihime can answer in the same session — security findings, complexity hints, and I/O fan-out — without additional source reads or tool calls.
 
 ---
 
