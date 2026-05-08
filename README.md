@@ -1,5 +1,7 @@
 # Orihime
 
+<!-- mcp-name: io.github.srinivasan-sundaresan95/orihime -->
+
 [![PyPI](https://img.shields.io/pypi/v/orihime)](https://pypi.org/project/orihime/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/MCP-server-blue)](https://modelcontextprotocol.io)

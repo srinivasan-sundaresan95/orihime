@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.srinivasan-sundaresan95/orihime",
+  "title": "Orihime Code Knowledge Graph",
+  "description": "Cross-repository code knowledge graph for Java, Kotlin, JavaScript, and TypeScript. Indexes source code into embedded KuzuDB via tree-sitter and exposes 30+ MCP tools for call-flow tracing, taint analysis (OWASP/CWE/PCI/STIG), performance hotspot detection, and license compliance — without reading source files. 95% fewer tokens than source-reading.",
+  "version": "1.9.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "orihime",
+      "version": "1.9.2",
+      "transport": {
+        "type": "stdio",
+        "command": "python",
+        "args": ["-m", "orihime", "serve"],
+        "env": {
+          "ORIHIME_DB_PATH": {
+            "description": "Path to the KuzuDB database directory",
+            "default": "~/.orihime/orihime.db"
+          }
+        }
+      }
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/srinivasan-sundaresan95/orihime"
+  }
+}
