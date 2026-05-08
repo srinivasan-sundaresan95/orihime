@@ -13,8 +13,6 @@ on:
 
 jobs:
   review:
-    # Only run when the triggering orihime-index workflow succeeded,
-    # and only when it was triggered by a pull_request event (not a push to master).
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -25,12 +23,7 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        run: |
-          python3 -m pip install --quiet httpx
+      - uses: actions/checkout@v4
 
       - name: Resolve PR number and branch
         id: pr-info
@@ -38,21 +31,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # For manual dispatch, find the most recent open PR targeting master
             PR_DATA=$(gh pr list --state open --base master --json number,headRefName --limit 1)
             PR_NUMBER=$(echo "$PR_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['number']) if d else print('')")
             BRANCH=$(echo "$PR_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['headRefName']) if d else print('')")
           else
-            # Extract from the triggering workflow run's associated PR
             RUN_ID="${{ github.event.workflow_run.id }}"
             PR_DATA=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}" \
               --jq '.pull_requests[0] | {number: .number, branch: .head.ref}')
             PR_NUMBER=$(echo "$PR_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('number',''))")
             BRANCH=$(echo "$PR_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('branch',''))")
           fi
-
           if [ -z "$PR_NUMBER" ] || [ -z "$BRANCH" ]; then
-            echo "Could not determine PR number or branch — skipping review"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
@@ -60,22 +49,11 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run Orihime security review
+      - uses: srinivasan-sundaresan95/orihime/actions/review@v1
         if: steps.pr-info.outputs.skip == 'false'
-        env:
-          ORIHIME_SSE_URL: ${{ secrets.ORIHIME_SSE_URL }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          DRY_RUN_FLAG=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            DRY_RUN_FLAG="--dry-run"
-          fi
-
-          python3 .github/scripts/orihime_review.py \
-            --pr "${{ steps.pr-info.outputs.pr_number }}" \
-            --repo "${{ github.repository }}" \
-            --sse-url "${ORIHIME_SSE_URL}" \
-            --github-token "${GITHUB_TOKEN}" \
-            --branch "${{ steps.pr-info.outputs.branch }}" \
-            --base-branch master \
-            $DRY_RUN_FLAG
+        with:
+          sse_url: ${{ secrets.ORIHIME_SSE_URL }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          pr_number: ${{ steps.pr-info.outputs.pr_number }}
+          branch: ${{ steps.pr-info.outputs.branch }}
+          dry_run: ${{ inputs.dry_run || 'false' }}

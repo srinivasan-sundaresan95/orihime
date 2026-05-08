@@ -1,0 +1,63 @@
+name: Orihime Security Review
+description: Compare PR branch security findings against master baseline and post inline GitHub comments.
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  sse_url:
+    description: URL of the Orihime SSE MCP server (e.g. http://your-server:7702)
+    required: true
+  github_token:
+    description: GitHub token for posting PR comments (use secrets.GITHUB_TOKEN)
+    required: true
+  pr_number:
+    description: Pull request number
+    required: true
+  branch:
+    description: PR branch name to analyse
+    required: true
+  base_branch:
+    description: Base branch to compare against (default: master)
+    required: false
+    default: master
+  repo_name:
+    description: Logical repo name in the Orihime graph (default: github.repository)
+    required: false
+    default: ${{ github.repository }}
+  dry_run:
+    description: Print comments without posting them (true/false)
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install httpx
+      shell: bash
+      run: pip install --quiet httpx
+
+    - name: Copy review script
+      shell: bash
+      run: |
+        SCRIPT_SRC="${{ github.action_path }}/../../examples/github-actions/scripts/orihime_review.py"
+        cp "$SCRIPT_SRC" "$RUNNER_TEMP/orihime_review.py"
+
+    - name: Run Orihime security review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        DRY_RUN_FLAG=""
+        if [ "${{ inputs.dry_run }}" = "true" ]; then
+          DRY_RUN_FLAG="--dry-run"
+        fi
+        python3 "$RUNNER_TEMP/orihime_review.py" \
+          --pr "${{ inputs.pr_number }}" \
+          --repo "${{ github.repository }}" \
+          --sse-url "${{ inputs.sse_url }}" \
+          --github-token "${{ inputs.github_token }}" \
+          --branch "${{ inputs.branch }}" \
+          --base-branch "${{ inputs.base_branch }}" \
+          --orihime-repo-name "${{ inputs.repo_name }}" \
+          $DRY_RUN_FLAG

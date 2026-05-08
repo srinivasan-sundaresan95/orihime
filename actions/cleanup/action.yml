@@ -1,0 +1,33 @@
+name: Orihime Cleanup
+description: Delete a PR branch index from Orihime when the PR is closed.
+branding:
+  icon: trash-2
+  color: purple
+
+inputs:
+  write_url:
+    description: URL of the Orihime write server (e.g. http://your-server:7701)
+    required: true
+  branch:
+    description: Branch name whose index should be deleted
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Delete branch index from Orihime
+      shell: bash
+      run: |
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST "${{ inputs.write_url }}/write" \
+          -H "Content-Type: application/json" \
+          -d "{\"statements\": [{\"cypher\": \"MATCH (f:File {branch_name: \$branch}) DETACH DELETE f\", \"params\": {\"branch\": \"${{ inputs.branch }}\"}}]}")
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | head -n -1)
+        echo "Response: $BODY"
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "Warning: cleanup returned HTTP $HTTP_CODE — branch index may remain"
+        else
+          ROWS=$(echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rows_affected', 0))")
+          echo "Deleted $ROWS node(s) for branch ${{ inputs.branch }}"
+        fi

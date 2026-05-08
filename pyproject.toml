@@ -9,6 +9,23 @@ description = "Cross-repository code knowledge graph for Java/Kotlin/JS/TS — M
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
+keywords = ["mcp", "mcp-server", "model-context-protocol", "code-analysis", "call-graph", "taint-analysis", "sast", "java", "kotlin", "javascript", "typescript", "kuzudb", "tree-sitter", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/srinivasan-sundaresan95/orihime"
+Repository = "https://github.com/srinivasan-sundaresan95/orihime"
+"Bug Tracker" = "https://github.com/srinivasan-sundaresan95/orihime/issues"
 dependencies = [
     "kuzu>=0.6",
     "tree-sitter>=0.23",

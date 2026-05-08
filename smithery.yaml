@@ -1,0 +1,62 @@
+name: orihime
+displayName: Orihime Code Knowledge Graph
+description: >
+  Cross-repository code knowledge graph for Java, Kotlin, JavaScript, and TypeScript.
+  Indexes your source code into KuzuDB using tree-sitter and exposes the graph as an
+  MCP server. Ask natural language questions about call flows, taint paths, security
+  findings, and performance hotspots across multiple services — without reading source files.
+homepage: https://github.com/srinivasan-sundaresan95/orihime
+license: MIT
+categories:
+  - code-analysis
+  - security
+  - developer-tools
+tags:
+  - call-graph
+  - taint-analysis
+  - sast
+  - java
+  - kotlin
+  - javascript
+  - typescript
+  - kuzudb
+  - tree-sitter
+  - cross-repo
+startCommand:
+  type: stdio
+  command: python
+  args: ["-m", "orihime", "serve"]
+  env:
+    ORIHIME_DB_PATH:
+      description: Path to the KuzuDB database directory
+      required: false
+      default: "~/.orihime/orihime.db"
+tools:
+  - name: find_callers
+    description: All methods that call the given method
+  - name: find_callees
+    description: All methods called by the given method
+  - name: blast_radius
+    description: Transitive set of callers up to N hops
+  - name: find_taint_flows
+    description: Single-hop value-flow taint from source annotations to sinks
+  - name: find_taint_paths
+    description: Multi-hop BFS taint with full call chain, sanitizer-aware
+  - name: find_reachable_sinks
+    description: Taint sinks reachable from real entry points only
+  - name: find_cross_service_taint
+    description: Taint paths that cross service boundaries via REST calls
+  - name: generate_security_report
+    description: Security report mapped to OWASP / CWE / PCI / STIG frameworks
+  - name: find_entry_points
+    description: All HTTP, Kafka, Scheduled, JMS, RabbitMQ entry points
+  - name: find_complexity_hints
+    description: Methods flagged with O(n²), N+1, unbounded-query, recursive patterns
+  - name: estimate_capacity
+    description: Little's Law capacity per endpoint; flags near-saturation
+  - name: find_license_violations
+    description: Flag GPL/AGPL/LGPL dependencies via Maven Central
+  - name: search_symbol
+    description: Full-text search across class and method FQNs
+  - name: get_file_location
+    description: File path and line number for any class or method

@@ -1,5 +1,10 @@
 # Orihime
 
+[![PyPI](https://img.shields.io/pypi/v/orihime)](https://pypi.org/project/orihime/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![MCP](https://img.shields.io/badge/MCP-server-blue)](https://modelcontextprotocol.io)
+[![Smithery](https://smithery.ai/badge/orihime)](https://smithery.ai/server/orihime)
+
 A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript codebases. Orihime indexes your source code into an embedded [KuzuDB](https://kuzudb.com/) graph database using [tree-sitter](https://tree-sitter.github.io/) and exposes the graph through an **MCP server** (for AI assistants), a local web UI, and a CLI.
 
 > **Mythology**: Orihime (織姫) is Vega — the weaving princess who weaves the fabric of the cosmos. She weaves connections. The tool that weaves your codebase into a single graph.
