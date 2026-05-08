@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orihime"
-version = "1.9.2"
+version = "1.9.3"
 description = "Cross-repository code knowledge graph for Java/Kotlin/JS/TS — MCP server, web UI, CLI"
 readme = "README.md"
 license = {text = "MIT"}

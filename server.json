@@ -3,12 +3,12 @@
   "name": "io.github.srinivasan-sundaresan95/orihime",
   "title": "Orihime Code Knowledge Graph",
   "description": "Cross-repository code knowledge graph for Java, Kotlin, JavaScript, and TypeScript. Indexes source code into embedded KuzuDB via tree-sitter and exposes 30+ MCP tools for call-flow tracing, taint analysis (OWASP/CWE/PCI/STIG), performance hotspot detection, and license compliance — without reading source files. 95% fewer tokens than source-reading.",
-  "version": "1.9.2",
+  "version": "1.9.3",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "orihime",
-      "version": "1.9.2",
+      "version": "1.9.3",
       "transport": {
         "type": "stdio",
         "command": "python",
