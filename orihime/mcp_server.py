@@ -1134,6 +1134,166 @@ def find_taint_flows(repo_name: str) -> list[dict]:
         return [{"error": str(exc)}]
 
 
+# ---------------------------------------------------------------------------
+# Security Tool S-NEW: find_taint_paths
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_taint_paths(repo_name: str, max_depth: int = 5) -> list[dict]:
+    """Multi-hop taint path analysis from annotation-based sources to dangerous sinks.
+
+    Performs BFS forward through CALLS edges from all taint-source methods
+    (those annotated with @RequestParam, @PathVariable, @RequestBody, etc.)
+    up to max_depth hops. Sanitizer calls prune the branch. All distinct
+    call chains reaching a sink are returned.
+
+    Unlike find_taint_flows (single-hop, arg_pos=0 only), this tool finds
+    handler → service → sink chains of arbitrary depth up to max_depth.
+
+    Args:
+        repo_name: Repository to analyse.
+        max_depth: Maximum hop depth (default 5, capped at 10).
+
+    Returns:
+        List of dicts with keys:
+            source_method_fqn, source_annotations, sink_method_fqn, sink_type,
+            path_length, call_chain, sanitizer_pruned, file_path, line_start.
+        Empty list if no repo found, no sources, or no paths exist.
+    """
+    from orihime.security_config import get_security_config  # noqa: PLC0415
+
+    conn = _get_connection()
+    if conn is None:
+        return []
+
+    max_depth = min(max_depth, 10)
+    if max_depth <= 0:
+        return []
+
+    try:
+        # 1. Resolve repo_id
+        r = conn.execute(
+            "MATCH (repo:Repo) WHERE repo.name = $name RETURN repo.id",
+            {"name": repo_name},
+        )
+        if not r.has_next():
+            return []
+        repo_id = r.get_next()[0]
+
+        cfg = get_security_config()
+
+        # 2. Load full in-repo CALLS adjacency list (one query)
+        r_calls = conn.execute(
+            "MATCH (a:Method)-[c:CALLS]->(b:Method) WHERE a.repo_id = $rid "
+            "RETURN a.id, b.id, c.callee_name",
+            {"rid": repo_id},
+        )
+        adj: dict[str, list[tuple[str, str]]] = {}
+        while r_calls.has_next():
+            src, dst, cname = r_calls.get_next()
+            adj.setdefault(src, []).append((dst, cname or ""))
+
+        # 3. Load method id→fqn mapping (one query)
+        r_fqn = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid RETURN m.id, m.fqn",
+            {"rid": repo_id},
+        )
+        id_to_fqn: dict[str, str] = {}
+        while r_fqn.has_next():
+            mid, fqn = r_fqn.get_next()
+            id_to_fqn[mid] = fqn
+
+        # 4. Precompute sink and sanitizer ID sets for O(1) BFS checks
+        sink_ids: set[str] = {mid for mid, fqn in id_to_fqn.items() if cfg.is_sink_method(fqn)}
+        sanitizer_ids: set[str] = {mid for mid, fqn in id_to_fqn.items() if cfg.is_sanitizer_method(fqn)}
+
+        # 5. Collect taint source methods (annotation-based)
+        r_sources = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND size(m.annotations) > 0 "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.id, m.fqn, m.annotations, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        source_info: dict[str, dict] = {}
+        while r_sources.has_next():
+            mid, fqn, annotations, file_path, line_start = r_sources.get_next()
+            if any(cfg.is_source_annotation(ann) for ann in (annotations or [])):
+                source_info[mid] = {
+                    "fqn": fqn,
+                    "annotations": annotations or [],
+                    "file_path": file_path,
+                    "line_start": line_start or 0,
+                }
+
+        if not source_info:
+            return []
+
+        # 6. BFS from each source method
+        raw_results: list[dict] = []
+        for source_id, src in source_info.items():
+            source_fqn = src["fqn"]
+            queue: deque[tuple[str, list[str]]] = deque([(source_id, [source_fqn])])
+
+            while queue:
+                current_id, path = queue.popleft()
+
+                if len(path) - 1 >= max_depth:
+                    continue
+
+                path_fqn_set = set(path)
+
+                for callee_id, _callee_name in adj.get(current_id, []):
+                    callee_fqn = id_to_fqn.get(callee_id, callee_id)
+
+                    # Per-path cycle guard
+                    if callee_fqn in path_fqn_set:
+                        continue
+
+                    new_path = path + [callee_fqn]
+
+                    # Sanitizer: prune branch, do not record or enqueue
+                    if callee_id in sanitizer_ids:
+                        continue
+
+                    # Sink: record result, but continue BFS (do not prune)
+                    if callee_id in sink_ids:
+                        sink_short = callee_fqn.split(".")[-1]
+                        sink_type = _OWASP_MAPPINGS.get(sink_short, "A00:2021-Uncategorized")
+                        raw_results.append({
+                            "source_method_fqn":  source_fqn,
+                            "source_annotations": [
+                                ann for ann in src["annotations"]
+                                if cfg.is_source_annotation(ann)
+                            ],
+                            "sink_method_fqn":    callee_fqn,
+                            "sink_type":          sink_type,
+                            "path_length":        len(new_path) - 1,
+                            "call_chain":         new_path,
+                            "sanitizer_pruned":   False,
+                            "file_path":          src["file_path"],
+                            "line_start":         src["line_start"],
+                        })
+
+                    queue.append((callee_id, new_path))
+
+        # 7. Deduplicate identical call chains
+        seen_chains: set[tuple[str, ...]] = set()
+        deduped: list[dict] = []
+        for r2 in raw_results:
+            key = tuple(r2["call_chain"])
+            if key not in seen_chains:
+                seen_chains.add(key)
+                deduped.append(r2)
+
+        # 8. Sort: path_length asc, then source_method_fqn asc
+        deduped.sort(key=lambda x: (x["path_length"], x["source_method_fqn"]))
+        return deduped
+
+    except Exception as exc:
+        log.error("find_taint_paths(%r, %d): %s", repo_name, max_depth, exc)
+        return [{"error": str(exc)}]
+
+
 @mcp.tool()
 def list_security_config() -> dict:
     """Return the active security configuration (sources, sinks, sanitizers).

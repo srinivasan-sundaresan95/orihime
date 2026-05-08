@@ -54,7 +54,7 @@ mcp__orihime__find_taint_sinks(repo_name="<repo>")
 
 ---
 
-## Step 3 — Value-flow taint (stricter, argument-level)
+## Step 3 — Value-flow taint: single-hop (fast, high-confidence)
 
 ```
 mcp__orihime__find_taint_flows(repo_name="<repo>")
@@ -63,16 +63,49 @@ mcp__orihime__find_taint_flows(repo_name="<repo>")
 > **Limitation**: single-hop only — finds source-annotated methods that
 > directly call a sink (caller_arg_pos=0). Misses handler → service → sink
 > patterns (depth 2+) and taint passed as second+ argument.
->
-> **Workaround for deeper paths**: use `find_reachable_sinks` to identify all
-> sink-reachable methods from entry points, then call
-> `find_callers(sink_method_fqn)` iteratively to trace backward toward the
-> entry point. This reconstructs the path manually hop by hop.
 
 Returns only findings where a tainted argument (@RequestParam/@RequestBody/@PathVariable)
 flows directly into a known sink's first parameter via a CALLS edge.
-This is stricter than find_reachable_sinks — fewer results, higher confidence.
-Use both: reachable_sinks for breadth, taint_flows for high-confidence findings.
+Fewer results, high confidence. Use as a fast first pass; follow up with Step 3b for depth.
+
+---
+
+## Step 3b — Multi-hop taint BFS (preferred for deep paths)
+
+```
+mcp__orihime__find_taint_paths(repo_name="<repo>", max_depth=5)
+```
+
+BFS from all taint-source-annotated entry points through CALLS edges to all reachable
+sinks, returning the full call chain for each path. Sanitizer-aware: paths through a
+sanitizer method are pruned automatically. Deduplicates on call_chain.
+
+Result keys: `source_fqn`, `source_endpoint`, `source_annotations`, `sink_fqn`,
+`sink_type`, `path_length`, `call_chain`, `repo_name`
+
+**When to use**:
+- `find_taint_flows` returns few or zero results but `find_reachable_sinks` shows sinks
+- User asks "full taint path" or "trace from handler through service to sink"
+- You need sanitizer-aware pruning (paths through `sanitize*`/`validate*`/`encode*` are excluded)
+- You need the full call_chain for a finding report
+
+**max_depth guidance**: default 5 covers most service → repo patterns. Increase to 8–10
+for deep call stacks; cap is 10 (requests above 10 are silently clamped).
+
+**Tool comparison**:
+
+| Tool | Scope | Chain returned | Sanitizer-aware | FP risk |
+|---|---|---|---|---|
+| `find_reachable_sinks` | Reachability only (broad) | No | No | Medium |
+| `find_taint_flows` | Single-hop value-flow | Implicit (1 hop) | No | Low |
+| `find_taint_paths` | Multi-hop BFS value-flow | Yes (full chain) | Yes | Low |
+| `find_second_order_injection` | Structural (write→read) | No | No | High (30–50%) |
+
+**Recommended 4-step audit workflow**:
+1. `find_reachable_sinks` — broad surface scan (entry-point filtered)
+2. `find_taint_flows` — fast single-hop high-confidence check
+3. `find_taint_paths` — deep multi-hop with full chain (preferred over manual workaround)
+4. `find_second_order_injection` — structural approx, manual review required
 
 ---
 
@@ -174,7 +207,8 @@ results seem missing or unexpected — confirm the expected sources/sinks are lo
 | A10 — SSRF | Y |
 
 ### Value-Flow Taint (high confidence)
-- N findings where tainted args flow directly to sinks
+- find_taint_flows: N findings (single-hop, direct source→sink)
+- find_taint_paths: N findings (multi-hop BFS, full call chain, sanitizer-pruned)
 
 ### Cross-Service Taint
 - N paths crossing service boundaries (higher severity)
@@ -209,13 +243,12 @@ trace actual data flow. Expect 30–50% false positive rate on typical Java
 Spring codebases. Use it to generate a shortlist for manual review, not as a
 scanner output.
 
-### find_taint_flows vs find_reachable_sinks — use both
-find_taint_flows: confirmed value-flow (source annotation → direct sink call),
-low false positives, misses depth 2+ paths.
-find_reachable_sinks: reachability only (entry point → any sink via call graph),
-higher coverage, no call chain returned, no sanitizer awareness.
-For a thorough audit: run both. Findings in find_reachable_sinks but not in
-find_taint_flows are candidates for manual taint tracing.
+### find_taint_flows vs find_reachable_sinks vs find_taint_paths — use the right tool
+`find_taint_flows`: single-hop value-flow, low FPs, misses depth 2+. Fast first pass.
+`find_reachable_sinks`: reachability only, broad surface scan, no chain returned.
+`find_taint_paths`: multi-hop BFS, full call chain, sanitizer-aware. Preferred for deep analysis.
+For a thorough audit: run all three. Sinks in reachable_sinks but absent from taint_paths
+are likely pruned by sanitizers — confirm that sanitizer is real, not a false prune.
 
 ### Do NOT read source files
 This skill uses MCP tools only. All findings are in the graph.
