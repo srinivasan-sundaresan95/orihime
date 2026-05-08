@@ -250,5 +250,20 @@ scanner output.
 For a thorough audit: run all three. Sinks in reachable_sinks but absent from taint_paths
 are likely pruned by sanitizers — confirm that sanitizer is real, not a false prune.
 
+### JS/TS taint detection — partial support
+Source methods (`req.body`, `req.query`, `req.params`, `req.headers`,
+`searchParams.get`, `useSearchParams`) and common sinks (`Client.query`,
+`fs.readFile`, `fs.createReadStream`, `child_process.exec`, `child_process.spawn`,
+`fetch`, `axios.*`) are now in the built-in config. Sinks use qualified names
+(e.g. `Client.query` not bare `query`) to avoid false positives on Java repos. Detection works via
+method-call matching on CALLS edges — handlers that call `req.body` directly
+are treated as tainted entry points.
+
+**Limitation**: JS/TS has no parameter annotations. Taint tracking relies on
+the handler *calling* a source method, not on annotated parameters. Indirect
+taint (a utility wrapping `req.body` and returning the value) will be missed.
+Until a full JS/TS data-flow engine is added (OQ8 follow-up), treat JS/TS
+findings as partial coverage.
+
 ### Do NOT read source files
 This skill uses MCP tools only. All findings are in the graph.

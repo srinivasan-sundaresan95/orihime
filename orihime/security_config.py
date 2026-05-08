@@ -75,6 +75,18 @@ _BUILTIN_SOURCE_METHODS: list[str] = [
     "HttpServletRequest.getReader",
     # Spring convenience
     "ServerHttpRequest.getBody",
+    # Express / Node.js request object properties
+    "req.query",
+    "req.params",
+    "req.body",
+    "req.headers",
+    "request.query",
+    "request.params",
+    "request.body",
+    "request.headers",
+    # Web APIs / Next.js
+    "searchParams.get",
+    "useSearchParams",
 ]
 
 _BUILTIN_SINK_METHODS: list[str] = [
@@ -102,6 +114,28 @@ _BUILTIN_SINK_METHODS: list[str] = [
     "File.<init>",
     "Files.readAllBytes",
     "Files.newBufferedReader",
+    # Node.js pg / mysql2 — SQL sinks (qualified to avoid false positives on Java .query/.execute)
+    "Client.query",
+    "Pool.query",
+    "Connection.query",
+    "pool.query",
+    # Node.js child_process — command injection
+    "child_process.exec",
+    "child_process.execSync",
+    "child_process.spawn",
+    "child_process.spawnSync",
+    # Node.js filesystem — path traversal
+    "fs.readFile",
+    "fs.readFileSync",
+    "fs.createReadStream",
+    # HTTP clients — SSRF
+    "axios.get",
+    "axios.post",
+    "axios.put",
+    "axios.delete",
+    "axios.patch",
+    "axios.request",
+    "fetch",
 ]
 
 _BUILTIN_SANITIZER_METHODS: list[str] = [
@@ -110,6 +144,23 @@ _BUILTIN_SANITIZER_METHODS: list[str] = [
     "ESAPI.encoder",
     "Encode.forHtml",
 ]
+
+# Patterns that must match via full endswith only — their short segment is too generic
+# (e.g. "get", "query", "body") and would cause false positives on Java repos if
+# allowed to short-name match. All JS/TS dotted source/sink patterns go here.
+_ENDSWITH_ONLY_PATTERNS: frozenset[str] = frozenset([
+    # JS/TS source methods (req.X, searchParams.get)
+    "req.query", "req.params", "req.body", "req.headers",
+    "request.query", "request.params", "request.body", "request.headers",
+    "searchParams.get",
+    # JS/TS sink methods (Client.query, axios.get, etc.)
+    "Client.query", "Pool.query", "Connection.query", "pool.query",
+    "axios.get", "axios.post", "axios.put", "axios.delete",
+    "axios.patch", "axios.request",
+    # Spring WebClient — HTTP verb methods too generic to short-match
+    "WebClient.get", "WebClient.post", "WebClient.put",
+    "WebClient.delete", "WebClient.patch",
+])
 
 
 # ---------------------------------------------------------------------------
@@ -138,10 +189,17 @@ class SecurityConfig:
             for s in self.source_annotations
         )
 
+    def is_source_method(self, method_name: str) -> bool:
+        short = method_name.split(".")[-1]
+        return any(
+            (method_name.endswith(s) if s in _ENDSWITH_ONLY_PATTERNS else (short == s.split(".")[-1] or method_name.endswith(s)))
+            for s in self.source_methods
+        )
+
     def is_sink_method(self, method_name: str) -> bool:
         short = method_name.split(".")[-1]
         return any(
-            short == s.split(".")[-1] or method_name.endswith(s)
+            (method_name.endswith(s) if s in _ENDSWITH_ONLY_PATTERNS else (short == s.split(".")[-1] or method_name.endswith(s)))
             for s in self.sink_methods
         )
 

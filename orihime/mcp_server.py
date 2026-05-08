@@ -1100,6 +1100,21 @@ def find_taint_flows(repo_name: str) -> list[dict]:
                 source_method_ids.add(mid)
                 source_info[mid] = {"fqn": fqn, "file_path": file_path, "line_start": line_start}
 
+        # JS/TS source methods: handlers that call req.body / req.query etc.
+        r_callee_sources = conn.execute(
+            "MATCH (m:Method)-[:CALLS]->(s:Method) "
+            "WHERE m.repo_id = $rid "
+            "MATCH (f:File) WHERE f.id = m.file_id "
+            "RETURN m.id, m.fqn, s.name, s.fqn, f.path, m.line_start",
+            {"rid": repo_id},
+        )
+        while r_callee_sources.has_next():
+            mid, fqn, callee_name, callee_fqn, file_path, line_start = r_callee_sources.get_next()
+            if cfg.is_source_method(callee_fqn or "") or cfg.is_source_method(callee_name or ""):
+                if mid not in source_method_ids:
+                    source_method_ids.add(mid)
+                    source_info[mid] = {"fqn": fqn, "file_path": file_path, "line_start": line_start}
+
         if not source_method_ids:
             return []
 
@@ -1224,6 +1239,24 @@ def find_taint_paths(repo_name: str, max_depth: int = 5) -> list[dict]:
                     "file_path": file_path,
                     "line_start": line_start or 0,
                 }
+
+        # JS/TS: methods that call a source method (req.body, req.query, etc.)
+        # Reuse the already-loaded adj + id_to_fqn — no extra query needed.
+        for caller_id, edges in adj.items():
+            if caller_id in source_info:
+                continue
+            if any(
+                cfg.is_source_method(id_to_fqn.get(callee_id, "")) or cfg.is_source_method(callee_name)
+                for callee_id, callee_name in edges
+            ):
+                caller_fqn = id_to_fqn.get(caller_id, "")
+                if caller_fqn:
+                    source_info[caller_id] = {
+                        "fqn": caller_fqn,
+                        "annotations": [],
+                        "file_path": "",
+                        "line_start": 0,
+                    }
 
         if not source_info:
             return []
