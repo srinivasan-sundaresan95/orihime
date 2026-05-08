@@ -13,8 +13,6 @@ on:
 
 jobs:
   review:
-    # Only run when the triggering orihime-index workflow succeeded,
-    # and only when it was triggered by a pull_request event (not a push to master).
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -38,12 +36,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # For manual dispatch, find the most recent open PR targeting master
             PR_DATA=$(gh pr list --state open --base master --json number,headRefName --limit 1)
             PR_NUMBER=$(echo "$PR_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['number']) if d else print('')")
             BRANCH=$(echo "$PR_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['headRefName']) if d else print('')")
           else
-            # Extract from the triggering workflow run's associated PR
             RUN_ID="${{ github.event.workflow_run.id }}"
             PR_DATA=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}" \
               --jq '.pull_requests[0] | {number: .number, branch: .head.ref}')
@@ -66,6 +62,10 @@ jobs:
           ORIHIME_SSE_URL: ${{ secrets.ORIHIME_SSE_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [ -z "${ORIHIME_SSE_URL}" ]; then
+            echo "ORIHIME_SSE_URL not configured — skipping review (set secret to enable)"
+            exit 0
+          fi
           DRY_RUN_FLAG=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"

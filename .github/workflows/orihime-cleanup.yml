@@ -12,6 +12,10 @@ jobs:
         env:
           ORIHIME_WRITE_URL: ${{ secrets.ORIHIME_WRITE_URL }}
         run: |
+          if [ -z "${ORIHIME_WRITE_URL}" ]; then
+            echo "ORIHIME_WRITE_URL not configured — skipping cleanup (set secret to enable)"
+            exit 0
+          fi
           echo "Deleting Orihime index for branch ${{ github.head_ref }}"
           RESPONSE=$(curl --silent --show-error \
             --retry 3 --retry-delay 5 \

@@ -19,6 +19,10 @@ jobs:
         env:
           ORIHIME_WRITE_URL: ${{ secrets.ORIHIME_WRITE_URL }}
         run: |
+          if [ -z "${ORIHIME_WRITE_URL}" ]; then
+            echo "ORIHIME_WRITE_URL not configured — skipping index (set secret to enable)"
+            exit 0
+          fi
           echo "Indexing branch ${{ github.head_ref }} for PR #${{ github.event.pull_request.number }}"
           RESPONSE=$(curl --silent --show-error --fail \
             --retry 3 --retry-delay 5 \
@@ -51,6 +55,10 @@ jobs:
         env:
           ORIHIME_WRITE_URL: ${{ secrets.ORIHIME_WRITE_URL }}
         run: |
+          if [ -z "${ORIHIME_WRITE_URL}" ]; then
+            echo "ORIHIME_WRITE_URL not configured — skipping index (set secret to enable)"
+            exit 0
+          fi
           echo "Re-indexing master after merge"
           RESPONSE=$(curl --silent --show-error --fail \
             --retry 3 --retry-delay 5 \

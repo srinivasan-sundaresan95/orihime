@@ -1,0 +1,26 @@
+{
+  "$schema": "https://glama.ai/mcp/glama.schema.json",
+  "name": "Orihime",
+  "description": "Cross-repository code knowledge graph MCP server for Java, Kotlin, JavaScript, and TypeScript. Indexes source code into embedded KuzuDB via tree-sitter and exposes 30+ tools for call-flow tracing, multi-hop taint analysis (OWASP/CWE/PCI/STIG reports), entry-point reachability filtering, performance hotspot detection, and license compliance — without reading source files. 95% fewer tokens vs source-reading baseline.",
+  "license": "MIT",
+  "categories": [
+    "security",
+    "code-analysis",
+    "developer-tools"
+  ],
+  "tags": [
+    "call-graph",
+    "taint-analysis",
+    "sast",
+    "java",
+    "kotlin",
+    "javascript",
+    "typescript",
+    "kuzudb",
+    "tree-sitter",
+    "owasp",
+    "cwe",
+    "license-compliance"
+  ],
+  "relatedServers": []
+}
