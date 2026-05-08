@@ -32,7 +32,7 @@ Rejected alternatives:
 
 KuzuDB is an embedded property graph database with Cypher query support. Chosen over:
 
-- **Neo4j** — GPL v3 for Community; cannot use at Rakuten without license review. Enterprise is commercial.
+- **Neo4j** — GPL v3 for Community; requires license review for commercial use. Enterprise is commercial.
 - **SQLite + adjacency table** — possible but requires manual graph traversal in Python; no Cypher; no built-in path queries (`CALLS*1..N`)
 - **DuckDB** — columnar, not graph-native; Cypher path queries would need manual implementation
 - **TigerGraph / Memgraph** — server-only, no embedded mode for local dev

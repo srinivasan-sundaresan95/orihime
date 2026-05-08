@@ -1,6 +1,6 @@
 """Integration tests for the cross-repo resolver.
 
-Both point-bank-bff and point-bitcoin-internal-api are indexed into the
+A BFF service and a downstream API service are indexed into the
 same KuzuDB instance, then run_cross_resolution is called once.
 
 Mark: @pytest.mark.integration  (deselect with -m "not integration")
@@ -16,11 +16,11 @@ import pytest
 from orihime.indexer import index_repo
 from orihime.cross_resolver import run_cross_resolution
 
-BFF_REPO_PATH = "/mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bank-bff"
-BFF_REPO_NAME = "point-bank-bff"
+BFF_REPO_PATH = os.getenv("BFF_REPO_PATH", "/path/to/your/bff-service")
+BFF_REPO_NAME = os.getenv("BFF_REPO_NAME", "bff-service")
 
-BITCOIN_REPO_PATH = "/mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bitcoin-internal-api"
-BITCOIN_REPO_NAME = "point-bitcoin-internal-api"
+DOWNSTREAM_REPO_PATH = os.getenv("DOWNSTREAM_REPO_PATH", "/path/to/your/downstream-service")
+DOWNSTREAM_REPO_NAME = os.getenv("DOWNSTREAM_REPO_NAME", "downstream-service")
 
 
 # ---------------------------------------------------------------------------
@@ -37,9 +37,9 @@ def cross_resolved():
     bff_stats = index_repo(BFF_REPO_PATH, BFF_REPO_NAME, db_path)
     print(f"\n[cross-integration] BFF index stats: {bff_stats}")
 
-    # Index Bitcoin API into the same DB (schema already present)
-    btc_stats = index_repo(BITCOIN_REPO_PATH, BITCOIN_REPO_NAME, db_path)
-    print(f"[cross-integration] Bitcoin index stats: {btc_stats}")
+    # Index downstream service into the same DB (schema already present)
+    downstream_stats = index_repo(DOWNSTREAM_REPO_PATH, DOWNSTREAM_REPO_NAME, db_path)
+    print(f"[cross-integration] Downstream index stats: {downstream_stats}")
 
     db = kuzu.Database(db_path)
     conn = kuzu.Connection(db)

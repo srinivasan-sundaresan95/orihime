@@ -1,4 +1,4 @@
-"""Integration tests for indexing point-bank-bff into Orihime."""
+"""Integration tests for indexing a BFF service into Orihime."""
 from __future__ import annotations
 
 import os
@@ -9,8 +9,8 @@ import pytest
 
 from orihime.indexer import index_repo
 
-BFF_REPO_PATH = "/mnt/c/Users/srinivasa.sundaresan/IdeaProjects/point-bank-bff"
-BFF_REPO_NAME = "point-bank-bff"
+BFF_REPO_PATH = os.getenv("BFF_REPO_PATH", "/path/to/your/bff-service")
+BFF_REPO_NAME = os.getenv("BFF_REPO_NAME", "bff-service")
 
 
 @pytest.fixture(scope="module")
@@ -34,38 +34,38 @@ def test_bff_method_count(bff_conn):
 
 @pytest.mark.integration
 def test_bff_endpoint_count(bff_conn):
-    """BFF uses @BitcoinEndpoint (custom annotation, no standard path field).
+    """BFF uses custom controller annotations, not standard Spring path fields.
 
-    Orihime extracts 0 endpoints from point-bank-bff because its controller methods
-    are annotated with a domain-specific @BitcoinEndpoint(api, version) rather than
+    Orihime extracts 0 endpoints from the BFF service because its controller methods
+    are annotated with domain-specific custom annotations rather than
     standard Spring @GetMapping/@PostMapping. This is expected behaviour — custom
     annotation support is Phase 2. The test documents the actual count.
     """
     result = bff_conn.execute("MATCH (e:Endpoint) RETURN count(e)")
     count = result.get_next()[0]
     print(f"\n[bff] endpoint count = {count}")
-    # 0 is correct for Phase 1 — BFF uses custom @BitcoinEndpoint, not standard Spring mappings
+    # 0 is correct for Phase 1 — BFF uses custom controller annotations, not standard Spring mappings
     assert count == 0, f"Expected 0 endpoints (custom annotation), got {count}"
 
 
 @pytest.mark.integration
 def test_bff_has_repo_node(bff_conn):
-    """A Repo node named 'point-bank-bff' should exist after indexing."""
+    """A Repo node matching BFF_REPO_NAME should exist after indexing."""
     result = bff_conn.execute(
-        "MATCH (r:Repo) WHERE r.name = 'point-bank-bff' RETURN r"
+        f"MATCH (r:Repo) WHERE r.name = '{BFF_REPO_NAME}' RETURN r"
     )
     rows = []
     while result.has_next():
         rows.append(result.get_next())
     print(f"\n[bff] repo rows found = {len(rows)}")
-    assert len(rows) == 1, f"Expected exactly 1 Repo node for 'point-bank-bff', got {len(rows)}"
+    assert len(rows) == 1, f"Expected exactly 1 Repo node for '{BFF_REPO_NAME}', got {len(rows)}"
 
 
 @pytest.mark.integration
 def test_bff_endpoints_have_paths(bff_conn):
     """Endpoint path validation — skipped when BFF produces no endpoints (expected).
 
-    point-bank-bff uses @BitcoinEndpoint(api, version) which carries no URL path.
+    The BFF service uses custom controller annotations which carry no URL path.
     Until Phase 2 custom-annotation support, the BFF will produce 0 endpoints and
     this test documents that invariant.
     """
@@ -75,7 +75,7 @@ def test_bff_endpoints_have_paths(bff_conn):
         paths.append(result.get_next()[0])
     print(f"\n[bff] total endpoints checked = {len(paths)}")
     if len(paths) == 0:
-        pytest.skip("No endpoints in BFF (custom @BitcoinEndpoint — Phase 2)")
+        pytest.skip("No endpoints in BFF (custom controller annotations — Phase 2)")
     empty = [p for p in paths if not p]
     assert empty == [], f"Found {len(empty)} endpoint(s) with empty/null path: {empty}"
 

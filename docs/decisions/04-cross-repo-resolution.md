@@ -2,7 +2,7 @@
 
 ## The problem
 
-A BFF calls internal APIs over HTTP. `point-bank-bff` makes a `RestClient` call to `/bitcoin/wallet/status`. Without cross-repo resolution, this shows up only as an `UNRESOLVED_CALL` with `url_pattern = "/bitcoin/wallet/status"`. We don't know which repo owns that endpoint or which method handles it.
+A BFF calls internal APIs over HTTP. `order-service` makes a `RestClient` call to `/inventory/check-stock`. Without cross-repo resolution, this shows up only as an `UNRESOLVED_CALL` with `url_pattern = "/inventory/check-stock"`. We don't know which repo owns that endpoint or which method handles it.
 
 ## Two-phase approach
 
@@ -35,7 +35,7 @@ String equality fails for any path with variables. `/bitcoin/wallet/{easyId}` wo
 ## Unresolved calls are permanent, not errors
 
 Some RestCalls will never resolve:
-- Calls to external third-party APIs (Rakuten Pay, external partners)
+- Calls to external partners and third-party APIs
 - Calls to repos not yet indexed
 - Calls where the URL is fully dynamic (stored as `DYNAMIC` sentinel)
 

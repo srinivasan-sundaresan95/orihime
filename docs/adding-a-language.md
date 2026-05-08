@@ -6,7 +6,7 @@ This guide walks through adding support for a new programming language. The exam
 
 ## 1. How the Language Registry Works
 
-`dedalus/language.py` contains three cooperating pieces:
+`orihime/language.py` contains three cooperating pieces:
 
 **`LanguageExtractor` Protocol** — any class with these attributes satisfies it:
 
@@ -40,7 +40,7 @@ pip install tree-sitter-python
 
 For other languages the pattern is always `tree-sitter-<lang>`. Check [PyPI](https://pypi.org/) for availability before proceeding. If no package exists, see section 4.
 
-After installing, add the grammar to `_LANGUAGE_FACTORIES` in `dedalus/language.py`:
+After installing, add the grammar to `_LANGUAGE_FACTORIES` in `orihime/language.py`:
 
 ```python
 import tree_sitter_python
@@ -73,7 +73,7 @@ Spend time reading the `sexp()` output. The node type names (e.g. `function_defi
 
 ---
 
-### Step 3 — Create `dedalus/python_extractor.py`
+### Step 3 — Create `orihime/python_extractor.py`
 
 The file must define a class that satisfies the `LanguageExtractor` Protocol and call `register()` at module level.
 
@@ -119,7 +119,7 @@ The `extract()` method receives the fully-parsed `tree_sitter.Tree`. Walk it by 
 
 ### Step 4 — What `extract()` must return
 
-`ExtractResult` is a dataclass with four `list[dict]` fields. Each dict becomes a node row in KuzuDB. The required keys for each list are defined by the schema in `dedalus/schema.py`.
+`ExtractResult` is a dataclass with four `list[dict]` fields. Each dict becomes a node row in KuzuDB. The required keys for each list are defined by the schema in `orihime/schema.py`.
 
 See the full field reference in section 3 below.
 
@@ -137,9 +137,9 @@ See the full field reference in section 3 below.
 
 ### Step 5 — Register and wire the import
 
-At the bottom of `dedalus/python_extractor.py`, the `register(PythonExtractor())` call (already shown in the skeleton above) is enough to add the extractor to the registry at import time.
+At the bottom of `orihime/python_extractor.py`, the `register(PythonExtractor())` call (already shown in the skeleton above) is enough to add the extractor to the registry at import time.
 
-Then add the import to `dedalus/__init__.py`:
+Then add the import to `orihime/__init__.py`:
 
 ```python
 import orihime.python_extractor  # registers PythonExtractor on import

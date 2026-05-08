@@ -16,8 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from functools import partial
 from pydantic import BaseModel
 import kuzu
+
+from orihime.indexer import index_repo
 
 log = logging.getLogger(__name__)
 app = FastAPI(title="Orihime Write Server")
@@ -25,6 +28,10 @@ app = FastAPI(title="Orihime Write Server")
 _db: kuzu.Database | None = None
 _conn: kuzu.Connection | None = None
 _lock = asyncio.Lock()
+
+
+def _db_path() -> str:
+    return os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".orihime" / "orihime.db"))
 
 
 class WriteRequest(BaseModel):
@@ -40,7 +47,7 @@ class WriteResponse(BaseModel):
 @app.on_event("startup")
 async def _startup() -> None:
     global _db, _conn
-    db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".orihime" / "orihime.db"))
+    db_path = _db_path()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     _db = kuzu.Database(str(db_path))
     _conn = kuzu.Connection(_db)
@@ -60,10 +67,37 @@ async def write(req: WriteRequest) -> WriteResponse:
             return WriteResponse(ok=False, error=str(exc))
 
 
+class ReindexRequest(BaseModel):
+    repo_path: str
+    repo_name: str
+    branch: str = "master"
+    force: bool = False
+
+
+class ReindexResponse(BaseModel):
+    ok: bool
+    summary: dict[str, Any] = {}
+    error: str = ""
+
+
+@app.post("/reindex", response_model=ReindexResponse)
+async def reindex(req: ReindexRequest) -> ReindexResponse:
+    async with _lock:
+        try:
+            loop = asyncio.get_running_loop()
+            summary = await loop.run_in_executor(
+                None,
+                partial(index_repo, req.repo_path, req.repo_name, _db_path(),
+                        force=req.force, branch=req.branch),
+            )
+            return ReindexResponse(ok=True, summary=summary)
+        except Exception as exc:
+            return ReindexResponse(ok=False, error=str(exc))
+
+
 @app.get("/health")
 async def health() -> dict:
-    db_path = os.environ.get("ORIHIME_DB_PATH", str(Path.home() / ".orihime" / "orihime.db"))
-    return {"status": "ok", "db_path": db_path}
+    return {"status": "ok", "db_path": _db_path()}
 
 
 @app.get("/ping")

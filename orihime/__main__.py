@@ -4,6 +4,7 @@
 # python -m orihime resolve [--db ~/.orihime/orihime.db]
 # python -m orihime install-skills
 # python -m orihime register
+# python -m orihime serve-sse [--port 7702] [--db ~/.orihime/orihime.db]
 import argparse
 import json
 import shutil
@@ -269,6 +270,18 @@ def main() -> None:
         help="Path to the KuzuDB database file (default: ~/.orihime/orihime.db)",
     )
 
+    # ---- serve-sse ----
+    sse_parser = subparsers.add_parser(
+        "serve-sse",
+        help="Start the MCP server with SSE transport (for CI runners and remote MCP clients)",
+    )
+    sse_parser.add_argument("--port", type=int, default=7702)
+    sse_parser.add_argument(
+        "--db",
+        default=_DEFAULT_DB_PATH,
+        help="Path to the KuzuDB database file (default: ~/.orihime/orihime.db)",
+    )
+
     # ---- legacy flat args: python -m orihime --repo ... --name ... ----
     # Keep backwards compatibility: if the first arg starts with '--', treat
     # the whole invocation as an implicit 'index' command.
@@ -321,6 +334,14 @@ def main() -> None:
         _os.environ.setdefault("ORIHIME_DB_PATH", args.db)
         print(f"\n  Orihime Write Server  ->  http://localhost:{args.port}\n  Press Ctrl+C to stop.\n")
         uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
+        return
+
+    if args.command == "serve-sse":
+        import os as _os
+        _os.environ.setdefault("ORIHIME_DB_PATH", args.db)
+        from orihime.mcp_server import mcp
+        mcp.settings.port = args.port
+        mcp.run(transport="sse")
         return
 
     # Legacy mode: re-parse with flat args

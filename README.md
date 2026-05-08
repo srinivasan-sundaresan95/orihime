@@ -173,6 +173,7 @@ All operations are also accessible directly without an AI assistant:
 python -m orihime index        --repo PATH  --name NAME  [--db PATH] [--force] [--branch NAME]
 python -m orihime ui           [--port 7700] [--db PATH]
 python -m orihime serve
+python -m orihime serve-sse    [--port 7702] [--db PATH]
 python -m orihime resolve        [--db PATH]
 python -m orihime write-server   [--port 7701] [--db PATH]
 python -m orihime register       [--db PATH] [--python PATH]
@@ -184,6 +185,7 @@ python -m orihime install-skills
 | `index` | Parse a repository and write its graph into KuzuDB |
 | `ui` | Start the local web UI on port 7700 |
 | `serve` | Start the MCP server on stdio (for Claude Code, Claude Desktop, any MCP client) |
+| `serve-sse` | Start the MCP server with SSE transport (for CI runners and remote clients) |
 | `resolve` | Match RestCall URL patterns against Endpoints across all indexed repos |
 | `write-server` | Start the write-serialization server for team/server deployments |
 | `register` | Write the Orihime MCP server entry to `~/.claude/settings.json` |
@@ -236,6 +238,20 @@ The built-in config covers `HttpServletRequest`, `@RequestParam`, `@PathVariable
 
 ---
 
+## Documentation
+
+| Doc | Description |
+|---|---|
+| [MCP Server](docs/mcp-server.md) | All MCP tools with parameters and examples |
+| [Extractors](docs/extractors.md) | How Java/Kotlin/JS/TS are parsed; ExtractResult schema |
+| [Security Config](docs/security-config.md) | Custom sources, sinks, sanitizers — YAML reference |
+| [CI Integration](docs/ci-integration.md) | GitHub Actions PR review workflow setup |
+| [Docker](docs/docker.md) | Docker Compose setup for server deployments |
+| [Adding a Language](docs/adding-a-language.md) | How to add a new language extractor |
+| [Cross-Repo Resolution](docs/resolver.md) | How REST calls are matched to endpoints across repos |
+
+---
+
 ## Team / Server Mode
 
 KuzuDB has a single-writer constraint. In team deployments where multiple developers re-index simultaneously, run the write-serialization server:
@@ -267,7 +283,7 @@ Phase 2: KuzuDB writes (batched by table, 500-edge transactions)
 KuzuDB embedded graph  ←──────────────────────────────┐
     │                                                   │
     ├── MCP server (FastMCP, stdio)                     │
-    ├── Web UI (FastAPI, port 7700)                     │
+    ├── Web UI (Starlette, port 7700)                   │
     └── Write server (FastAPI, port 7701, team mode) ──┘
 ```
 
@@ -323,7 +339,7 @@ Batch write speedup vs naive per-row writes: **12×**.
 
 #### Java/Kotlin codebase (845 + 224 files, measured)
 
-Benchmarked on `pointclubapp-api` (845 Kotlin files) and `point-bitcoin-internal-api` (224 Java files), tracing one controller endpoint through service → repositories → upstream APIs. GitNexus v1.6.3, Orihime v1.9, and a grep+source-read baseline were all measured on the same codebase on the same hardware (WSL2/Ubuntu, Intel i7, 2026-04-30).
+Benchmarked on a 845-file Kotlin service and a 224-file Java service, tracing one controller endpoint through service → repositories → upstream APIs. GitNexus v1.6.3, Orihime v1.9, and a grep+source-read baseline were all measured on the same codebase on the same hardware (WSL2/Ubuntu, Intel i7, 2026-04-30).
 
 | Approach | Cold index | Query latency | Avg tokens/query | Files read |
 |---|---|---|---|---|

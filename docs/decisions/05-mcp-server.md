@@ -54,7 +54,7 @@ The MCP server is registered in `~/.claude/settings.json`:
   "mcpServers": {
     "orihime": {
       "command": "python",
-      "args": ["-m", "dedalus.mcp_server"],
+      "args": ["-m", "orihime.mcp_server"],
       "env": {
         "KUZU_LOCAL_PATH": "/home/srini/.orihime/orihime.db"
       }

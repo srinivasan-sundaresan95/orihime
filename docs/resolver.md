@@ -2,7 +2,7 @@
 
 ## What the resolver does
 
-`dedalus/resolver.py` converts a tree-sitter AST for a single source file into a
+`orihime/resolver.py` converts a tree-sitter AST for a single source file into a
 list of directed call edges between methods. It matches call-site names against
 a pre-built FQN index using a suffix strategy, emitting a `CALLS` edge when a
 match is found and an `UNRESOLVED_CALL` edge otherwise. It does not perform

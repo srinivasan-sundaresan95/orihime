@@ -2,7 +2,7 @@
 
 ## Why Orihime exists
 
-GitNexus (https://github.com/abhigyanpatwari/GitNexus) provides similar functionality but is licensed under PolyForm Noncommercial. PolyForm Noncommercial prohibits use by for-profit corporations for any purpose. Using or forking GitNexus at Rakuten — even internally — would constitute a license violation.
+GitNexus (https://github.com/abhigyanpatwari/GitNexus) provides similar functionality but is licensed under PolyForm Noncommercial. PolyForm Noncommercial prohibits use by for-profit corporations for any purpose. Using or forking GitNexus in a commercial product would constitute a license violation.
 
 Orihime is built from scratch using library documentation only (tree-sitter, KuzuDB, MCP SDK). No GitNexus source code was read during implementation.
 

@@ -1,0 +1,60 @@
+# KuzuDB single-writer constraint:
+# KuzuDB supports concurrent reads but only one writer at a time.
+# orihime-write is the sole service that holds a write connection to the database.
+# orihime-sse and orihime-ui must open read-only connections; if either attempts
+# to open a write connection on startup, it will conflict with orihime-write.
+# Ensure the serve-sse and ui entry points use read-only database access.
+
+services:
+  orihime-write:
+    build: .
+    container_name: orihime-write
+    command: ["python", "-m", "orihime", "write-server", "--port", "7701", "--db", "/data/orihime.db"]
+    ports:
+      - "7701:7701"
+    volumes:
+      - orihime-data:/data
+    environment:
+      - ORIHIME_DB_PATH=/data/orihime.db
+    networks:
+      - orihime-net
+    restart: unless-stopped
+
+  orihime-sse:
+    build: .
+    container_name: orihime-sse
+    command: ["python", "-m", "orihime", "serve-sse", "--port", "7702", "--db", "/data/orihime.db"]
+    ports:
+      - "7702:7702"
+    volumes:
+      - orihime-data:/data
+    environment:
+      - ORIHIME_DB_PATH=/data/orihime.db
+    networks:
+      - orihime-net
+    restart: unless-stopped
+    depends_on:
+      - orihime-write
+
+  orihime-ui:
+    build: .
+    container_name: orihime-ui
+    command: ["python", "-m", "orihime", "ui", "--port", "7700", "--db", "/data/orihime.db"]
+    ports:
+      - "7700:7700"
+    volumes:
+      - orihime-data:/data
+    environment:
+      - ORIHIME_DB_PATH=/data/orihime.db
+    networks:
+      - orihime-net
+    restart: unless-stopped
+    depends_on:
+      - orihime-write
+
+volumes:
+  orihime-data:
+
+networks:
+  orihime-net:
+    driver: bridge

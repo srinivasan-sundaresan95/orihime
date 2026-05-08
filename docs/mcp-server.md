@@ -23,9 +23,9 @@ Add the following to `~/.claude/settings.json`:
   "mcpServers": {
     "orihime": {
       "type": "stdio",
-      "command": "/path/to/dedalus/.venv/bin/python",
+      "command": "/path/to/orihime/.venv/bin/python",
       "args": ["-m", "orihime", "serve"],
-      "cwd": "/path/to/dedalus",
+      "cwd": "/path/to/orihime",
       "env": {
         "ORIHIME_DB_PATH": "/home/youruser/.orihime/orihime.db"
       }
@@ -34,7 +34,7 @@ Add the following to `~/.claude/settings.json`:
 }
 ```
 
-After adding this entry, restart Claude Code. The `dedalus` MCP server will appear in the tool list.
+After adding this entry, restart Claude Code. The `orihime` MCP server will appear in the tool list.
 
 ## Configuration
 
@@ -90,8 +90,8 @@ Get the source file and line number for a method or class. Returns `null` if not
 List all HTTP endpoints in the graph. Pass a repo name to filter.
 
 ```
-list_endpoints("point-bitcoin-internal-api")
-# → [{http_method: "GET", path: "/bitcoin/api/v1/balance", handler_fqn: "...", repo_name: "..."}]
+list_endpoints("my-service")
+# → [{http_method: "GET", path: "/api/v1/balance", handler_fqn: "...", repo_name: "..."}]
 ```
 
 ### `list_unresolved_calls(repo_name="")`
@@ -117,6 +117,5 @@ Set `ORIHIME_SERVER_URL` to a remote KuzuDB HTTP endpoint to share a single inde
 
 ## Known limitations
 
-- `@BitcoinEndpoint` and other custom Spring controller annotations are not extracted as endpoints (Phase 2).
 - Recursive variable-pattern Cypher is not used (KuzuDB 0.11.x compat); `blast_radius` uses iterative BFS in Python.
 - `file_id` in results is a UUID internal to the graph; resolve it via `get_file_location` or query `File` nodes directly to get the actual path.
