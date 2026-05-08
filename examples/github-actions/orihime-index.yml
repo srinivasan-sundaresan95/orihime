@@ -1,0 +1,73 @@
+name: orihime-index
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches:
+      - master
+
+jobs:
+  index-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Index PR branch into Orihime
+        env:
+          ORIHIME_WRITE_URL: ${{ secrets.ORIHIME_WRITE_URL }}
+        run: |
+          echo "Indexing branch ${{ github.head_ref }} for PR #${{ github.event.pull_request.number }}"
+          RESPONSE=$(curl --silent --show-error --fail \
+            --retry 3 --retry-delay 5 \
+            --write-out "\n%{http_code}" \
+            -X POST "${ORIHIME_WRITE_URL}/reindex" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repo_path": "${{ github.workspace }}",
+              "repo_name": "${{ github.repository }}",
+              "branch": "${{ github.head_ref }}",
+              "force": false
+            }')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "Response body: $BODY"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: /reindex returned HTTP $HTTP_CODE"
+            exit 1
+          fi
+          echo "Index completed successfully"
+
+  index-master:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Re-index master branch into Orihime
+        env:
+          ORIHIME_WRITE_URL: ${{ secrets.ORIHIME_WRITE_URL }}
+        run: |
+          echo "Re-indexing master after merge"
+          RESPONSE=$(curl --silent --show-error --fail \
+            --retry 3 --retry-delay 5 \
+            --write-out "\n%{http_code}" \
+            -X POST "${ORIHIME_WRITE_URL}/reindex" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repo_path": "${{ github.workspace }}",
+              "repo_name": "${{ github.repository }}",
+              "branch": "master",
+              "force": false
+            }')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "Response body: $BODY"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: /reindex returned HTTP $HTTP_CODE"
+            exit 1
+          fi
+          echo "Master re-index completed successfully"

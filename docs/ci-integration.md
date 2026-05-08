@@ -30,10 +30,25 @@ The GHA runner calls the write server (`ORIHIME_WRITE_URL`) to POST index result
 
 ---
 
+## Installation
+
+Copy the workflow templates from `examples/github-actions/` in this repo into your project's `.github/workflows/` directory:
+
+```bash
+cp examples/github-actions/orihime-index.yml    your-project/.github/workflows/
+cp examples/github-actions/orihime-review.yml   your-project/.github/workflows/
+cp examples/github-actions/orihime-cleanup.yml  your-project/.github/workflows/
+cp examples/github-actions/scripts/orihime_review.py  your-project/.github/scripts/
+```
+
+The workflows are **not** installed in Orihime's own repo — they belong in the repositories you want Orihime to analyze.
+
+---
+
 ## Prerequisites
 
 1. Orihime running in Docker on a server reachable from GitHub Actions runners (see [Docker setup](docker.md)).
-2. Two GitHub repository secrets configured:
+2. Two GitHub repository secrets configured in your project repo:
 
 | Secret | Example value | Description |
 |---|---|---|
@@ -44,11 +59,11 @@ The GHA runner calls the write server (`ORIHIME_WRITE_URL`) to POST index result
 
 ## Workflow reference
 
-| Workflow file | Trigger | What it does |
-|---|---|---|
-| `orihime-index.yml` | PR opened, PR synchronized (push) | Indexes the PR branch into Orihime via the write server |
-| `orihime-review.yml` | After `orihime-index.yml` completes | Queries the SSE MCP server; diffs findings against master baseline; posts inline comments for new findings |
-| `orihime-cleanup.yml` | PR closed (merged or abandoned) | Calls the write server to delete the PR branch index; re-indexes master if the PR was merged |
+| Workflow file | Location | Trigger | What it does |
+|---|---|---|---|
+| `orihime-index.yml` | `examples/github-actions/` | PR opened, PR synchronized (push) | Indexes the PR branch into Orihime via the write server |
+| `orihime-review.yml` | `examples/github-actions/` | After `orihime-index.yml` completes | Queries the SSE MCP server; diffs findings against master baseline; posts inline comments for new findings |
+| `orihime-cleanup.yml` | `examples/github-actions/` | PR closed (merged or abandoned) | Calls the write server to delete the PR branch index; re-indexes master if the PR was merged |
 
 ---
 
