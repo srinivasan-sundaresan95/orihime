@@ -11,6 +11,8 @@ A cross-repository code knowledge graph for Java/Kotlin/JavaScript/TypeScript co
 
 > **Mythology**: Orihime (織姫) is Vega — the weaving princess who weaves the fabric of the cosmos. She weaves connections. The tool that weaves your codebase into a single graph.
 
+![Orihime call graph — com.rakuten.point, ~1,200 classes, node size = out-degree, edge thickness = call count](docs/call-graph-example.png)
+
 ---
 
 ## What It Does
