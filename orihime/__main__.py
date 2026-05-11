@@ -56,6 +56,79 @@ def _install_skills_claude(src_root: Path) -> None:
     for name in installed:
         print(f"  /{name}")
     print("  → Restart Claude Code to activate.\n")
+    _write_claude_md_snippet()
+
+
+def _write_claude_md_snippet() -> None:
+    """Write/update the Orihime sub-agent discovery block in ~/.claude/CLAUDE.md."""
+    claude_md = Path.home() / ".claude" / "CLAUDE.md"
+    claude_md.parent.mkdir(parents=True, exist_ok=True)
+
+    db_path = str(Path.home() / ".orihime" / "orihime.db")
+
+    block = f"""\
+## Orihime Code Knowledge Graph
+
+Orihime is installed as an MCP server and provides a queryable code knowledge graph
+(classes, methods, call edges, endpoints, taint paths, complexity hints) for all
+indexed repositories.
+
+### IMPORTANT — Sub-agents must load Orihime tool schemas first
+
+Orihime MCP tools are deferred (not pre-loaded). Before calling any `mcp__orihime__*`
+tool, sub-agents MUST fetch the schemas:
+
+```
+ToolSearch(query="orihime", max_results=10)
+```
+
+Call this at the very start of any task that involves code exploration, analysis,
+or writing. Without this step, all `mcp__orihime__*` calls will fail with
+InputValidationError.
+
+### When to use Orihime (before reading any source file)
+
+- Finding which methods/classes are relevant to a task → `mcp__orihime__search_symbol`
+- Tracing call chains from entry points to loops/DB/sinks → `mcp__orihime__find_callees`
+- Finding all callers of a method → `mcp__orihime__find_callers`
+- Blast radius of a change → `mcp__orihime__blast_radius`
+- Loop/complexity risk detection → `mcp__orihime__find_complexity_hints`
+- Listing all indexed repos → `mcp__orihime__list_repos`
+
+### Workflow: Graph first, source second
+
+1. Use Orihime graph queries to identify the 2–5 files that matter
+2. Read ONLY those files (use `mcp__orihime__get_file_location` for exact paths + lines)
+3. Never read files speculatively — the graph tells you what to read
+
+### DB path
+
+`{db_path}`
+
+### Indexed repos
+
+Run `mcp__orihime__list_repos()` to see what is currently indexed.
+"""
+
+    marker_start = "## Orihime Code Knowledge Graph"
+    marker_end = "<!-- /orihime -->"
+    full_block = block + marker_end
+
+    existing = claude_md.read_text() if claude_md.exists() else ""
+    if marker_start in existing:
+        # Replace existing block
+        start_idx = existing.index(marker_start)
+        if marker_end in existing:
+            end_idx = existing.index(marker_end) + len(marker_end)
+            existing = existing[:start_idx].rstrip() + "\n\n" + full_block + "\n" + existing[end_idx:].lstrip()
+        else:
+            existing = existing[:start_idx].rstrip() + "\n\n" + full_block + "\n"
+        claude_md.write_text(existing)
+        print(f"[claude] Updated Orihime sub-agent discovery block in {claude_md}")
+    else:
+        with claude_md.open("a") as f:
+            f.write(("\n\n" if existing else "") + full_block + "\n")
+        print(f"[claude] Wrote Orihime sub-agent discovery block to {claude_md}")
 
 
 def _install_skills_cursor(src_root: Path) -> None:

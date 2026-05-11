@@ -7,6 +7,12 @@ description: >
   Uses Orihime MCP tools only — no source file reads unless the user explicitly asks to
   drill into the source after the graph analysis.
 ---
+> **Sub-agent usage:** Orihime MCP tools are deferred. If you are running inside a sub-agent,
+> call `ToolSearch(query="orihime", max_results=10)` BEFORE any `mcp__orihime__*` tool call,
+> or you will get an InputValidationError. Alternatively, have the main session query Orihime
+> first and pass the resulting file paths + method names directly to this agent.
+
+
 
 # Orihime Change Impact Skill
 
