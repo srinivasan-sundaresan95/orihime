@@ -45,6 +45,14 @@ _KOTLIN_DATA_GENERATED_NAMES: frozenset[str] = frozenset({
 })
 _KOTLIN_COMPONENT_RE = re.compile(r'^component\d+$')
 
+# Spring stereotype annotations that mark a class as a DI-managed bean.
+# When one of these is present on a Kotlin class, each IMPLEMENTS edge is
+# recorded in impl_map so the resolver can redirect interface-typed call sites
+# to the concrete implementation.
+_SPRING_COMPONENT_ANNOTATIONS: frozenset[str] = frozenset({
+    "Service", "Component", "Repository", "Controller", "RestController",
+})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -191,6 +199,43 @@ def _package_name(root_node, src: bytes) -> str:
     return ""
 
 
+def _import_map(root_node, src: bytes) -> dict[str, str]:
+    """Return {simple_name: fully_qualified_name} from import declarations.
+
+    Handles:
+    - ``import com.example.Foo``            → {"Foo": "com.example.Foo"}
+    - ``import com.example.Foo as Bar``     → {"Bar": "com.example.Foo"}
+    - ``import com.example.Foo.method``     → {"method": "com.example.Foo.method"}
+                                               AND {"Foo": "com.example.Foo"} (parent class)
+
+    Wildcard imports (``import com.example.*``) are intentionally skipped —
+    we cannot safely resolve them without a full classpath.
+    """
+    result: dict[str, str] = {}
+    for child in root_node.children:
+        # tree-sitter-kotlin uses node type "import" for import declarations
+        if child.type not in ("import_header", "import"):
+            continue
+        # The qualified_identifier child holds the full dotted name
+        qi = _child_by_type(child, "qualified_identifier")
+        if qi is None:
+            continue
+        fqn = _node_text(qi, src).strip()
+        # Skip wildcard imports
+        if fqn.endswith(".*") or fqn.endswith("*"):
+            continue
+        # Check for alias: import_alias child
+        alias: str | None = None
+        import_alias = _child_by_type(child, "import_alias")
+        if import_alias:
+            for alias_sub in import_alias.children:
+                if alias_sub.type in ("identifier", "simple_identifier"):
+                    alias = _node_text(alias_sub, src).strip()
+        simple = alias if alias else fqn.rsplit(".", 1)[-1]
+        result[simple] = fqn
+    return result
+
+
 from .path_utils import compile_path_regex as _path_regex
 
 
@@ -204,6 +249,7 @@ def _extract_kotlin_supertypes(
     class_fqn: str,
     class_id: str,
     package: str,
+    import_map: dict[str, str] | None = None,
 ) -> list[dict]:
     """Extract EXTENDS/IMPLEMENTS edges for a Kotlin class_declaration or object_declaration.
 
@@ -211,7 +257,9 @@ def _extract_kotlin_supertypes(
     - delegation_specifier with constructor_invocation → EXTENDS
     - delegation_specifier with user_type directly → IMPLEMENTS
 
-    FQN: f"{package}.{simple}" if package else simple.
+    FQN resolution order:
+    1. import_map lookup (exact match on simple name) → use the imported FQN
+    2. Same package as current file → f"{package}.{simple}"
     NOT called for interface_declaration or companion_object.
     """
     edges = []
@@ -224,6 +272,8 @@ def _extract_kotlin_supertypes(
         return []
 
     def _resolve(simple: str) -> str:
+        if import_map and simple in import_map:
+            return import_map[simple]
         return f"{package}.{simple}" if package else simple
 
     for spec in delegation_specs.children:
@@ -379,8 +429,10 @@ class KotlinExtractor:
         endpoints: list[dict] = []
         rest_calls: list[dict] = []
         inheritance_edges: list[dict] = []
+        impl_map: dict[str, str] = {}
 
         package = _package_name(root, src)
+        imports = _import_map(root, src)
 
         # Collect top-level and nested class-like declarations
         for class_node in _iter_class_nodes(root):
@@ -449,8 +501,15 @@ class KotlinExtractor:
 
             # Extract EXTENDS/IMPLEMENTS inheritance edges (class and object only)
             if class_node.type in ("class_declaration", "object_declaration"):
-                inh = _extract_kotlin_supertypes(class_node, src, fqn, class_id, package)
+                inh = _extract_kotlin_supertypes(class_node, src, fqn, class_id, package, import_map=imports)
                 inheritance_edges.extend(inh)
+                # Build impl_map for Spring beans: interface_fqn → impl_class_fqn.
+                # Used by the resolver to redirect interface-typed call sites to
+                # the concrete implementation (same as java_extractor does for Java).
+                if _SPRING_COMPONENT_ANNOTATIONS.intersection(class_annotations):
+                    for edge in inh:
+                        if edge["edge_type"] == "IMPLEMENTS":
+                            impl_map[edge["parent_fqn"]] = fqn
 
             # Class-level @RequestMapping prefix
             class_prefix = ""
@@ -638,6 +697,7 @@ class KotlinExtractor:
             methods=methods,
             endpoints=endpoints,
             rest_calls=rest_calls,
+            impl_map=impl_map,
             inheritance_edges=inheritance_edges,
         )
 

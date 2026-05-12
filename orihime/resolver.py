@@ -405,6 +405,30 @@ def _is_object_style_call(inv_node, source_bytes: bytes) -> bool:
     return False
 
 
+def _is_extension_function_callee(method_id: str, fqn_index: dict[str, str]) -> bool:
+    """Return True if the method_id corresponds to a statically-dispatched Kotlin function.
+
+    Two cases bypass the impl_index cross-file restriction:
+    1. Top-level / file-level extension functions compiled into ``<FileName>Kt``
+       synthetic classes (e.g. ``DateTimeUtilKt``, ``TopLevelFunctionsKt``).
+    2. Extension functions defined inside a companion object — the enclosing
+       class name ends in ``Companion`` (e.g. ``TimePeriodRestrictedCompanion``).
+       These are called with a receiver instance (``list.getAppliesToTime(t)``),
+       so ``_is_object_style_call`` returns False, but they are statically
+       dispatched and cannot be DI-injected.
+    """
+    for fqn, mid in fqn_index.items():
+        if mid == method_id:
+            # FQN pattern: "pkg.ClassName.methodName"
+            parts = fqn.rsplit(".", 2)
+            if len(parts) >= 2:
+                class_part = parts[-2]
+                if class_part.endswith("Kt") or class_part.endswith("Companion"):
+                    return True
+            return False
+    return False
+
+
 def _process_invocation(
     inv_node,
     source_bytes: bytes,
@@ -465,12 +489,24 @@ def _process_invocation(
     # to prevent accidental wiring to unregistered impl classes; cross-file
     # resolution goes exclusively through the impl_index gate.
     #
-    # Exception: Kotlin object/companion/static calls use a capitalised receiver
-    # (e.g. ``DateTimeUtil.isInTimePeriod()``).  These are statically dispatched
-    # and cannot be DI-injected, so we allow cross-file suffix matches for them.
+    # Exceptions (statically dispatched — cannot be DI-injected):
+    # 1. Kotlin object/companion/static calls: capitalised receiver
+    #    (e.g. ``DateTimeUtil.isInTimePeriod()``).
+    # 2. Kotlin top-level / extension functions compiled into ``<File>Kt``
+    #    classes (e.g. ``requestTime.isInLastSecondInclusive(...)``).
+    #    These have a lowercase receiver but resolve statically.
+    # 3. Unambiguous methods: the method name maps to exactly one method in
+    #    the entire suffix index.  These cannot be DI calls — if only one class
+    #    declares a method by this name, cross-file resolution is always safe
+    #    (e.g. ``it.isAppliesToTime(t)`` on an abstract-class instance).
     raw_matches = suffix_index.get(name, [])
     if impl_index is not None and not _is_object_style_call(inv_node, source_bytes):
-        matches = [mid for mid in raw_matches if mid in local_method_ids]
+        matches = [
+            mid for mid in raw_matches
+            if mid in local_method_ids
+            or (fqn_index is not None and _is_extension_function_callee(mid, fqn_index))
+            or len(raw_matches) == 1  # unambiguous — only one class declares this name
+        ]
     else:
         matches = raw_matches
 
