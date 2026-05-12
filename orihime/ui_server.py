@@ -313,9 +313,9 @@ class _DB:
             self._conn: Optional[object] = None
             log.warning("DB not found at %s — UI will show empty results.", db_path)
             return
-        db = kuzu.Database(str(path))
+        db = kuzu.Database(str(path), read_only=True)
         self._conn = kuzu.Connection(db)
-        log.info("UI opened KuzuDB at %s", db_path)
+        log.info("UI opened KuzuDB at %s (read-only)", db_path)
 
     def _rows(self, result, columns: list[str]) -> list[dict]:
         rows: list[dict] = []
@@ -893,9 +893,9 @@ class _DB:
         try:
             from orihime.indexer import index_repo  # noqa: PLC0415
             summary = index_repo(repo_path, repo_name, db_path)
-            # Reopen connection to pick up fresh data
+            # Reopen as read-only to pick up fresh data without holding write lock
             import kuzu  # noqa: PLC0415
-            db = kuzu.Database(db_path)
+            db = kuzu.Database(db_path, read_only=True)
             self._conn = kuzu.Connection(db)
             return summary
         except Exception as exc:
