@@ -25,6 +25,62 @@ description: >
 - "What depends on [method/interface]?"
 - "If I rename [method], what else needs updating?"
 - "Which callers will break if I change the signature of [method]?"
+- "What endpoints are affected by this PR / git diff?"
+- "Which API endpoints are impacted by changes in this commit?"
+
+---
+
+## PR / Git Diff → Impacted Endpoints (3-step workflow)
+
+Use this when the user provides a git diff, PR, or list of changed files and wants to know which HTTP endpoints are affected.
+
+### Step A — Extract changed symbols from the diff
+
+Parse the diff for changed class and method names, then resolve each to a full FQN:
+
+```
+mcp__orihime__search_symbol(query="<ClassName or methodName from diff>")
+```
+
+Repeat for each changed symbol. Collect all `fqn` values.
+
+### Step B — Blast radius for each changed FQN
+
+```
+mcp__orihime__blast_radius(method_fqn="<fqn>", max_depth=5)
+```
+
+This returns every method transitively affected (callers of callers up to N hops).
+Collect the union of all returned `fqn` values across all changed methods.
+
+### Step C — Cross-reference with known endpoints
+
+```
+mcp__orihime__list_endpoints(repo_name="<repo>")
+```
+
+This returns all HTTP endpoints with their `handler_fqn` field.
+
+**Intersect:** any `handler_fqn` from `list_endpoints` that appears in the blast radius union = an endpoint reachable from the changed code.
+
+Present as:
+
+```
+## Endpoints Impacted by This Change
+
+| Endpoint | Handler | Depth | Changed method that reaches it |
+|---|---|---|---|
+| GET /api/orders/{id} | OrderController.getOrder | d=2 | OrderService.findById |
+| POST /api/orders | OrderController.createOrder | d=3 | OrderValidator.validate |
+```
+
+If no endpoint handler appears in the blast radius, state explicitly: **"No HTTP endpoints are transitively reachable from the changed methods."**
+
+### Notes
+
+- `max_depth=5` is recommended for PR impact analysis (default 3 may miss deeply nested chains)
+- If multiple methods in the diff share a common ancestor (e.g. a shared utility), their endpoint impact sets will overlap — deduplicate in the final table
+- For batch/scheduled jobs (no HTTP handler), flag affected entry points from `find_entry_points()` instead
 
 ---
 
