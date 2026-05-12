@@ -42,6 +42,7 @@ import orihime.js_extractor  # noqa: F401 — side-effect: registers JsExtractor
 import orihime.kotlin_extractor  # noqa: F401 — side-effect: registers KotlinExtractor
 from orihime.language import get_extractor, get_parser
 from orihime.parse_result import ParseResult
+from orihime.framework_pass import run_framework_pass
 from orihime.resolver import build_fqn_index, resolve_calls
 from orihime.schema import init_schema
 from orihime.walker import walk_repo
@@ -961,14 +962,37 @@ def index_repo(
     extends_edges: list[tuple[str, str]] = []    # (child_id, parent_id)
     implements_edges: list[tuple[str, str]] = []  # (child_id, parent_id)
 
+    # External stub nodes (library classes not in the repo) keyed by fqn
+    external_class_stubs: dict[str, str] = {}  # fqn → stub_id
+
     for pr in parse_results.values():
         for edge in pr.inheritance_edges:
             child_id   = edge["child_id"]
             parent_fqn = edge["parent_fqn"]
             edge_type  = edge["edge_type"]
             parent_id  = fqn_to_class_id.get(parent_fqn)
+
             if parent_id is None:
-                continue
+                # Create a stub Class node for external library parents so that
+                # framework_pass (and Phase 6) can traverse EXTENDS/IMPLEMENTS
+                # edges to library types like OncePerRequestFilter.
+                if parent_fqn not in external_class_stubs:
+                    stub_id = str(__import__("uuid").uuid4())
+                    simple_name = parent_fqn.rsplit(".", 1)[-1]
+                    writer.execute("BEGIN TRANSACTION")
+                    writer.execute(
+                        "CREATE (:Class {id: $id, name: $name, fqn: $fqn, "
+                        "file_id: $fid, repo_id: $rid, is_interface: $ii, "
+                        "is_object: $io, enclosing_class_name: $enc, annotations: $ann})",
+                        {"id": stub_id, "name": simple_name, "fqn": parent_fqn,
+                         "fid": "", "rid": "__external__", "ii": False,
+                         "io": False, "enc": "", "ann": []},
+                    )
+                    writer.execute("COMMIT")
+                    external_class_stubs[parent_fqn] = stub_id
+                    fqn_to_class_id[parent_fqn] = stub_id
+                parent_id = fqn_to_class_id[parent_fqn]
+
             key = (child_id, parent_fqn, edge_type)
             if key in seen_inheritance:
                 continue
@@ -1074,5 +1098,16 @@ def index_repo(
                  "caller_arg_pos": -1, "callee_param_pos": -1},
             )
         writer.execute("COMMIT")
+
+    # -----------------------------------------------------------------------
+    # Phase 7 — Framework-mediated synthetic CALLS edges
+    # -----------------------------------------------------------------------
+    # Emit edges that the static resolver cannot see because the framework
+    # invokes them via reflection, AOP, or the servlet pipeline:
+    #   A — Bean Validation (@AssertTrue / @AssertFalse on @Valid fields)
+    #   B — OncePerRequestFilter / HandlerInterceptor (runs for every request)
+    #   C — Spring Application Events (@EventListener / publishEvent)
+    fw_counts = run_framework_pass(conn, writer, repo_id)
+    counters["call_edges"] += sum(fw_counts.values())
 
     return counters
