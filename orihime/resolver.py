@@ -507,6 +507,13 @@ def _process_invocation(
             or (fqn_index is not None and _is_extension_function_callee(mid, fqn_index))
             or len(raw_matches) == 1  # unambiguous — only one class declares this name
         ]
+        # Remove self-referential matches: a method calling itself by name is a
+        # legitimate pattern (recursion), but here the caller's own method sharing
+        # a name with a DI-injected service method (e.g. controller.getSbCardInfo
+        # calling sbService.getSbCardInfo) produces a false self-loop.  Drop the
+        # match if it equals caller_id — the impl_index gate below will resolve
+        # it to the correct impl class instead.
+        matches = [mid for mid in matches if mid != caller_id]
     else:
         matches = raw_matches
 
