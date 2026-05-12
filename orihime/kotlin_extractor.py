@@ -240,6 +240,141 @@ from .path_utils import compile_path_regex as _path_regex
 
 
 # ---------------------------------------------------------------------------
+# Field type extraction (for property-chain call resolution)
+# ---------------------------------------------------------------------------
+
+def _extract_kotlin_field_types(
+    class_node,
+    source_bytes: bytes,
+    import_map: dict[str, str],
+    package: str,
+) -> dict[str, str]:
+    """Return {field_name: simple_type_name} for all val/var properties of a class.
+
+    Covers two declaration sites:
+    1. Primary constructor parameters with val/var (class Foo(val bar: Bar))
+    2. Body property_declaration nodes (val baz: Baz = ...)
+
+    Only the simple type name is extracted (not FQN) — the resolver uses the
+    import_map / class_by_simple_name index to resolve FQNs at resolution time.
+    Nullable types (Bar?) and generic types (List<Bar>) are handled; for generics
+    the outer container name (e.g. "List") is stored since the resolver won't
+    follow into generics anyway.
+    """
+    result: dict[str, str] = {}
+
+    _LIST_TYPES = frozenset({"List", "MutableList", "Collection", "Iterable", "Set", "MutableSet"})
+
+    def _simple_type_from_node(type_node) -> str | None:
+        """Extract the simple type name from a type node.
+
+        For collection types (List<Foo>, etc.), returns the element type Foo
+        rather than "List" — this enables resolving `it.method()` inside lambdas
+        like `list.forEach { it.method() }`.
+        For non-collection types, returns the outermost simple name.
+        """
+        if type_node is None:
+            return None
+        # nullable_type wraps another type node
+        if type_node.type == "nullable_type":
+            for child in type_node.children:
+                if child.type in ("user_type", "type_reference"):
+                    return _simple_type_from_node(child)
+            return None
+        if type_node.type in ("user_type", "type_reference"):
+            # Get the outer type name first
+            outer_name = None
+            for child in type_node.children:
+                if child.type in ("identifier", "type_identifier", "simple_identifier"):
+                    outer_name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                    break
+            if outer_name in _LIST_TYPES:
+                # Return the element type from the type_argument instead
+                for child in type_node.children:
+                    if child.type == "type_arguments":
+                        for arg in child.children:
+                            if arg.type == "type_projection":
+                                for sub in arg.children:
+                                    if sub.type in ("user_type", "nullable_type", "type_reference"):
+                                        elem = _simple_type_from_node(sub)
+                                        if elem:
+                                            return elem
+            return outer_name
+        return None
+
+    # 1. Primary constructor class_parameters
+    primary_ctor = None
+    for child in class_node.children:
+        if child.type == "primary_constructor":
+            primary_ctor = child
+            break
+    if primary_ctor is not None:
+        for child in _walk_children(primary_ctor):
+            if child.type == "class_parameters":
+                for param in child.children:
+                    if param.type != "class_parameter":
+                        continue
+                    # Only val/var parameters become properties
+                    has_val_var = any(c.type in ("val", "var") for c in param.children)
+                    if not has_val_var:
+                        continue
+                    name_node = None
+                    type_node = None
+                    for c in param.children:
+                        if c.type in ("identifier", "simple_identifier") and name_node is None:
+                            name_node = c
+                        elif c.type in ("user_type", "nullable_type", "type_reference") and type_node is None:
+                            type_node = c
+                    if name_node is not None and type_node is not None:
+                        field_name = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+                        simple_type = _simple_type_from_node(type_node)
+                        if field_name and simple_type:
+                            result[field_name] = simple_type
+
+    # 2. Class body property_declaration nodes
+    class_body = _child_by_type(class_node, "class_body")
+    if class_body is not None:
+        for child in class_body.children:
+            if child.type != "property_declaration":
+                continue
+            # Find variable_declaration child → identifier + type
+            var_decl = None
+            for c in child.children:
+                if c.type == "variable_declaration":
+                    var_decl = c
+                    break
+            if var_decl is None:
+                continue
+            name_node = None
+            type_node = None
+            for c in var_decl.children:
+                if c.type in ("identifier", "simple_identifier") and name_node is None:
+                    name_node = c
+                elif c.type in ("user_type", "nullable_type", "type_reference") and type_node is None:
+                    type_node = c
+            # type annotation is sometimes a sibling of variable_declaration, not a child
+            if type_node is None:
+                for c in child.children:
+                    if c.type in ("user_type", "nullable_type", "type_reference"):
+                        type_node = c
+                        break
+            if name_node is not None and type_node is not None:
+                field_name = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+                simple_type = _simple_type_from_node(type_node)
+                if field_name and simple_type:
+                    result[field_name] = simple_type
+
+    return result
+
+
+def _walk_children(node):
+    """Shallow walk: yield node and direct children only."""
+    yield node
+    for child in node.children:
+        yield child
+
+
+# ---------------------------------------------------------------------------
 # Inheritance extraction
 # ---------------------------------------------------------------------------
 
@@ -430,6 +565,7 @@ class KotlinExtractor:
         rest_calls: list[dict] = []
         inheritance_edges: list[dict] = []
         impl_map: dict[str, str] = {}
+        class_field_types: dict[str, dict[str, str]] = {}
 
         package = _package_name(root, src)
         imports = _import_map(root, src)
@@ -510,6 +646,12 @@ class KotlinExtractor:
                     for edge in inh:
                         if edge["edge_type"] == "IMPLEMENTS":
                             impl_map[edge["parent_fqn"]] = fqn
+
+            # Extract field types for property-chain call resolution
+            if class_node.type in ("class_declaration", "object_declaration"):
+                ft = _extract_kotlin_field_types(class_node, src, imports, package)
+                if ft:
+                    class_field_types[fqn] = ft
 
             # Class-level @RequestMapping prefix
             class_prefix = ""
@@ -699,6 +841,7 @@ class KotlinExtractor:
             rest_calls=rest_calls,
             impl_map=impl_map,
             inheritance_edges=inheritance_edges,
+            class_field_types=class_field_types,
         )
 
 

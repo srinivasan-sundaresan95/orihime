@@ -46,6 +46,8 @@ def resolve_calls(
     repo_id: str,
     impl_index: dict[str, str] | None = None,  # NEW — optional, defaults to None
     classes: list[dict] | None = None,   # N1 — Kotlin object/companion resolution
+    class_field_types: dict[str, dict[str, str]] | None = None,  # property-chain resolution
+    class_parents: dict[str, list[str]] | None = None,   # inheritance walk for chain receiver
 ) -> list[CallEdge]:
     """Walk all method bodies in *tree* and emit call edges.
 
@@ -151,6 +153,15 @@ def resolve_calls(
         {m["id"] for m in methods} if impl_index is not None else set()
     )
 
+    # Build simple class name → class FQN index for property-chain resolution.
+    # Used by _resolve_chain_receiver_fqn to look up intermediate field types.
+    _class_by_simple_name: dict[str, str] = {}
+    for fqn in fqn_index:
+        class_fqn = fqn.rsplit(".", 1)[0]
+        simple = class_fqn.rsplit(".", 1)[-1]
+        if simple and simple not in _class_by_simple_name:
+            _class_by_simple_name[simple] = class_fqn
+
     # Build a lookup from simple class name → <init> method_id for
     # matching Java constructor_declaration nodes to their synthetic <init>.
     # E.g. "Address" → id-of-Address.<init>
@@ -179,6 +190,9 @@ def resolve_calls(
                 local_method_ids=_local_method_ids,
                 ctor_index=_ctor_index,
                 object_index=_object_index,
+                class_field_types=class_field_types,
+                class_by_simple_name=_class_by_simple_name,
+                class_parents=class_parents,
             )
         elif node.type == "constructor_declaration":
             # Java constructor body: treat as its class's <init> method
@@ -261,11 +275,24 @@ def _process_method_node(
     local_method_ids: set[str],
     ctor_index: "dict[str, list[str]] | None" = None,
     object_index: "dict[str, list[str]] | None" = None,
+    class_field_types: "dict[str, dict[str, str]] | None" = None,
+    class_by_simple_name: "dict[str, str] | None" = None,
+    class_parents: "dict[str, list[str]] | None" = None,
 ) -> None:
     """Emit CallEdge objects for all call sites inside *method_node*."""
     caller_id = _find_enclosing_method(method_node, source_bytes, methods)
     if caller_id is None:
         return
+
+    # Derive the caller's class FQN for property-chain resolution
+    caller_class_fqn: str | None = None
+    if class_field_types is not None:
+        for m in methods:
+            if m["id"] == caller_id:
+                fqn_str = m.get("fqn", "")
+                if "." in fqn_str:
+                    caller_class_fqn = fqn_str.rsplit(".", 1)[0]
+                break
 
     # Find the body block
     body_node = method_node.child_by_field_name("body")
@@ -292,6 +319,10 @@ def _process_method_node(
                 local_method_ids=local_method_ids,
                 ctor_index=ctor_index,
                 object_index=object_index,
+                class_field_types=class_field_types,
+                class_by_simple_name=class_by_simple_name,
+                class_parents=class_parents,
+                caller_class_fqn=caller_class_fqn,
             )
         elif node.type == "object_creation_expression":
             # Java: `new ClassName(...)` — emit a CALLS edge to ClassName.<init>
@@ -429,6 +460,206 @@ def _is_extension_function_callee(method_id: str, fqn_index: dict[str, str]) -> 
     return False
 
 
+def _collect_nav_chain(nav_node, source_bytes: bytes) -> list[str]:
+    """Flatten a nested navigation_expression into a left-to-right list of identifiers.
+
+    For ``a.b.c`` the tree is:
+        navigation_expression(navigation_expression(a, b), c)
+    This function returns [``a``, ``b``, ``c``].
+    """
+    result: list[str] = []
+    node = nav_node
+    while node.type == "navigation_expression":
+        right = None
+        left = None
+        for child in node.children:
+            if child.type in ("identifier", "simple_identifier"):
+                right = _text(child, source_bytes)
+            elif child.type == "navigation_expression":
+                left = child
+            elif child.type not in (".", "?."):
+                # Could be a call_expression (chained call) — stop
+                if right is None:
+                    right = _text(child, source_bytes)
+        if right:
+            result.append(right)
+        if left is not None:
+            node = left
+        else:
+            # Base: look for an identifier in remaining children
+            for child in node.children:
+                if child.type in ("identifier", "simple_identifier", "this_expression"):
+                    result.append(_text(child, source_bytes))
+                    break
+            break
+    result.reverse()
+    return result
+
+
+def _resolve_chain_receiver_fqn(
+    inv_node,
+    source_bytes: bytes,
+    caller_class_fqn: str,
+    class_field_types: dict[str, dict[str, str]],
+    class_by_simple_name: dict[str, str],
+) -> str | None:
+    """Return the FQN of the receiver class for a property-chain call, or None.
+
+    Handles two cases:
+    1. Direct chain: ``configurationProperties.abTest.testPeriod.isAppliesToTime(t)``
+       Walks field types from the caller's class through each property hop.
+    2. Lambda implicit receiver ``it``: ``list.firstOrNull { it.isAppliesToTime(t) }``
+       Resolves by finding the outer call_expression's navigation chain, which
+       gives us the collection field, whose stored element type IS ``it``'s type
+       (we store List<Foo> as "Foo" in class_field_types).
+    """
+    nav_node = None
+    for child in inv_node.children:
+        if child.type == "navigation_expression":
+            nav_node = child
+            break
+    if nav_node is None:
+        return None
+
+    chain = _collect_nav_chain(nav_node, source_bytes)
+    # chain = [root_var, seg1, seg2, ..., method_name]
+    if len(chain) < 2:
+        return None
+
+    # Case 2: receiver is "it" (lambda implicit parameter)
+    if chain[0] == "it" and len(chain) == 2:
+        # Walk up the AST to find the outer call_expression that owns this lambda
+        # The pattern is: outer_call(nav_chain, annotated_lambda)
+        # The nav_chain's last field gives us the collection field name.
+        outer_receiver_fqn = _resolve_lambda_it_receiver(
+            inv_node, source_bytes, caller_class_fqn, class_field_types, class_by_simple_name
+        )
+        return outer_receiver_fqn
+
+    segments = chain[:-1]  # drop method name
+    if segments and segments[0] in ("this", "super"):
+        current_fqn = caller_class_fqn
+        segments = segments[1:]
+    else:
+        root_var = segments[0]
+        segments = segments[1:]
+        root_type_simple = class_field_types.get(caller_class_fqn, {}).get(root_var)
+        if not root_type_simple:
+            return None
+        current_fqn = class_by_simple_name.get(root_type_simple)
+        if not current_fqn:
+            return None
+
+    # Walk remaining field segments
+    for seg in segments:
+        field_map = class_field_types.get(current_fqn, {})
+        next_simple = field_map.get(seg)
+        if not next_simple:
+            return None
+        current_fqn = class_by_simple_name.get(next_simple)
+        if not current_fqn:
+            return None
+
+    return current_fqn
+
+
+def _resolve_lambda_it_receiver(
+    inv_node,
+    source_bytes: bytes,
+    caller_class_fqn: str,
+    class_field_types: dict[str, dict[str, str]],
+    class_by_simple_name: dict[str, str],
+) -> str | None:
+    """Resolve the type of ``it`` in a lambda by inspecting the outer call chain.
+
+    For ``configurationProperties.displays.firstOrNull { it.isAppliesToTime(t) }``,
+    ``it`` is an element of ``displays``.  We stored ``displays`` with its element
+    type (``LotteryDisplay``) rather than ``List`` in class_field_types.  So we
+    walk up to the enclosing call_expression's navigation chain to find that field.
+    """
+    # Walk up: inv_node → lambda_literal → annotated_lambda → call_expression (outer)
+    node = inv_node.parent  # lambda_literal
+    if node is None:
+        return None
+    if node.type == "lambda_literal":
+        node = node.parent  # annotated_lambda or call_expression
+    if node is None:
+        return None
+    if node.type == "annotated_lambda":
+        node = node.parent  # call_expression (outer)
+    if node is None or node.type != "call_expression":
+        return None
+
+    # The outer call_expression has a navigation_expression as its first child
+    # e.g. "configurationProperties.displays.firstOrNull"
+    outer_nav = None
+    for child in node.children:
+        if child.type == "navigation_expression":
+            outer_nav = child
+            break
+    if outer_nav is None:
+        return None
+
+    # The outer chain is e.g. ["configurationProperties", "displays", "firstOrNull"]
+    # We want all but the last segment (the collection method like firstOrNull/filter/map)
+    outer_chain = _collect_nav_chain(outer_nav, source_bytes)
+    if len(outer_chain) < 2:
+        return None
+    # Drop the last item (the higher-order function name like "firstOrNull")
+    collection_chain = outer_chain[:-1]
+
+    # Now resolve collection_chain exactly like a normal property chain
+    if collection_chain[0] in ("this", "super"):
+        current_fqn = caller_class_fqn
+        collection_chain = collection_chain[1:]
+    else:
+        root_var = collection_chain[0]
+        collection_chain = collection_chain[1:]
+        root_type_simple = class_field_types.get(caller_class_fqn, {}).get(root_var)
+        if not root_type_simple:
+            return None
+        current_fqn = class_by_simple_name.get(root_type_simple)
+        if not current_fqn:
+            return None
+
+    for seg in collection_chain:
+        field_map = class_field_types.get(current_fqn, {})
+        next_simple = field_map.get(seg)
+        if not next_simple:
+            return None
+        current_fqn = class_by_simple_name.get(next_simple)
+        if not current_fqn:
+            return None
+
+    return current_fqn
+
+
+def _find_method_in_class_hierarchy(
+    receiver_fqn: str,
+    method_name: str,
+    fqn_index: dict[str, str],
+    class_parents: dict[str, list[str]],
+    max_depth: int = 5,
+) -> str | None:
+    """Return method_id for receiver_fqn.method_name, walking up the inheritance chain."""
+    visited: set[str] = set()
+    queue = [receiver_fqn]
+    for _ in range(max_depth):
+        if not queue:
+            break
+        next_queue: list[str] = []
+        for cls_fqn in queue:
+            if cls_fqn in visited:
+                continue
+            visited.add(cls_fqn)
+            candidate = f"{cls_fqn}.{method_name}"
+            if candidate in fqn_index:
+                return fqn_index[candidate]
+            next_queue.extend(class_parents.get(cls_fqn, []))
+        queue = next_queue
+    return None
+
+
 def _process_invocation(
     inv_node,
     source_bytes: bytes,
@@ -440,6 +671,10 @@ def _process_invocation(
     local_method_ids: set[str] | None = None,
     ctor_index: "dict[str, list[str]] | None" = None,
     object_index: "dict[str, list[str]] | None" = None,
+    class_field_types: "dict[str, dict[str, str]] | None" = None,
+    class_by_simple_name: "dict[str, str] | None" = None,
+    class_parents: "dict[str, list[str]] | None" = None,
+    caller_class_fqn: "str | None" = None,
 ) -> None:
     """Emit one CallEdge for this invocation node."""
     name = _get_invocation_name(inv_node, source_bytes)
@@ -516,6 +751,37 @@ def _process_invocation(
         matches = [mid for mid in matches if mid != caller_id]
     else:
         matches = raw_matches
+
+    # Property-chain resolution: a.b.c.method() where static dispatch can be
+    # determined by walking the declared field types of each intermediate object.
+    # Runs when impl_index is active (Kotlin mode), the call has a nav chain, and
+    # we haven't already resolved it via the object_index or unambiguous path.
+    if (
+        not matches
+        and impl_index is not None
+        and class_field_types
+        and caller_class_fqn
+        and fqn_index
+    ):
+        receiver_fqn = _resolve_chain_receiver_fqn(
+            inv_node, source_bytes, caller_class_fqn,
+            class_field_types, class_by_simple_name or {},
+        )
+        if receiver_fqn is not None:
+            hit_id = _find_method_in_class_hierarchy(
+                receiver_fqn, name, fqn_index, class_parents or {},
+            )
+            if hit_id is not None:
+                _cap, _cpp = _arg_pos()
+                edges.append(CallEdge(
+                    caller_id=caller_id,
+                    callee_id=hit_id,
+                    edge_type="CALLS",
+                    callee_name=name,
+                    caller_arg_pos=_cap,
+                    callee_param_pos=_cpp,
+                ))
+                return
 
     if matches:
         callee_id = matches[0]

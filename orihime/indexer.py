@@ -191,6 +191,7 @@ def _parse_file(args: tuple) -> ParseResult:
     result.impl_map = extract_result.impl_map
     result.inheritance_edges = extract_result.inheritance_edges
     result.entity_relations = extract_result.entity_relations
+    result.class_field_types = extract_result.class_field_types
 
     return result
 
@@ -783,6 +784,20 @@ def index_repo(
     unresolved_nodes: list[dict] = []                 # stub RestCall dicts
     unresolved_edges: list[tuple[str, str]] = []      # (caller_id, callee_id) for UNRESOLVED_CALL
 
+    # Build merged field-type map: class_fqn → {field_name → simple_type_name}
+    all_class_field_types: dict[str, dict[str, str]] = {}
+    for pr in parse_results.values():
+        all_class_field_types.update(pr.class_field_types)
+
+    # Build class_parents: class_fqn → [parent_fqns] from all inheritance edges
+    _class_id_to_fqn: dict[str, str] = {cls["id"]: cls["fqn"] for cls in all_classes}
+    class_parents: dict[str, list[str]] = {}
+    for pr in parse_results.values():
+        for edge in pr.inheritance_edges:
+            child_fqn = _class_id_to_fqn.get(edge["child_id"])
+            if child_fqn:
+                class_parents.setdefault(child_fqn, []).append(edge["parent_fqn"])
+
     for file_id, pr in parse_results.items():
         if not pr.methods and not pr.src_bytes:
             continue  # nothing to resolve
@@ -800,8 +815,10 @@ def index_repo(
             fqn_index,
             file_id,
             repo_id,
-            impl_index=impl_index,   # NEW — redirect UNRESOLVED calls to impl classes
-            classes=all_classes,     # N1 — Kotlin object/companion resolution
+            impl_index=impl_index,         # redirect UNRESOLVED calls to impl classes
+            classes=all_classes,           # Kotlin object/companion resolution
+            class_field_types=all_class_field_types,  # property-chain resolution
+            class_parents=class_parents,   # inheritance walk for chain receiver
         )
 
         for edge in edges:
