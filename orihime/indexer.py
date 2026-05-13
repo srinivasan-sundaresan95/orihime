@@ -193,6 +193,7 @@ def _parse_file(args: tuple) -> ParseResult:
     result.entity_relations = extract_result.entity_relations
     result.class_field_types = extract_result.class_field_types
     result.method_param_types = extract_result.method_param_types
+    result.file_import_maps = extract_result.file_import_maps
 
     return result
 
@@ -670,6 +671,34 @@ def index_repo(
             entity_relation_rows.append(er)
             counters["entity_relations"] += 1
 
+    # RC-H: Deduplicate Method and Class nodes by FQN — keep first occurrence.
+    # Generic methods (e.g. AbstractConditionConfig.isApplicable) may be extracted
+    # multiple times when a generic class is instantiated with different type params,
+    # producing duplicate Method nodes with identical FQN and inflating blast_radius.
+    seen_method_fqns: set[str] = set()
+    deduped_method_rows: list[dict] = []
+    for m in method_rows:
+        if m["fqn"] not in seen_method_fqns:
+            seen_method_fqns.add(m["fqn"])
+            deduped_method_rows.append(m)
+    method_rows = deduped_method_rows
+    counters["methods"] = len(method_rows)  # update counter
+
+    seen_class_fqns: set[str] = set()
+    deduped_class_rows: list[dict] = []
+    for c in class_rows:
+        if c["fqn"] not in seen_class_fqns:
+            seen_class_fqns.add(c["fqn"])
+            deduped_class_rows.append(c)
+    class_rows = deduped_class_rows
+    counters["classes"] = len(class_rows)  # update counter
+
+    # Keep only contains_method edges for method IDs that survived deduplication
+    valid_method_ids: set[str] = {m["id"] for m in method_rows}
+
+    # Also rebuild all_methods to reflect deduplication
+    all_methods = [m for m in all_methods if m["id"] in valid_method_ids]
+
     # --- Flush File nodes (one transaction for entire table) ---
     if file_rows:
         writer.execute("BEGIN TRANSACTION")
@@ -795,6 +824,28 @@ def index_repo(
     for pr in parse_results.values():
         all_method_param_types.update(pr.method_param_types)
 
+    # Build merged per-file import maps: file_id → {simple_name → fqn}
+    # Used by resolve_calls (RC-A) for accurate call-site type disambiguation
+    all_file_import_maps: dict[str, dict[str, str]] = {}
+    for pr in parse_results.values():
+        all_file_import_maps.update(pr.file_import_maps)
+
+    # RC-I2 TODO (Lombok getter fallback suppression):
+    # Build set of class FQNs annotated with @Data or @Getter so that the resolver
+    # can skip the suffix-fallback for getter/setter calls on Lombok-annotated types,
+    # preventing wrong-class resolution of e.g. txHistory.getEasyId().
+    #
+    #   lombok_data_classes: set[str] = set()
+    #   for cls in class_rows:
+    #       anns = cls.get("annotations", [])
+    #       if "Data" in anns or "Getter" in anns:
+    #           lombok_data_classes.add(cls["fqn"])
+    #
+    # Then pass frozenset(lombok_data_classes) to resolve_calls() and, inside
+    # _find_method_in_class_hierarchy, when receiver type is in lombok_data_classes
+    # and method name matches r'^(get|set|is)[A-Z]', return None (skip fallback,
+    # leave as UNRESOLVED).
+
     # Build class_parents: class_fqn → [parent_fqns] from all inheritance edges
     _class_id_to_fqn: dict[str, str] = {cls["id"]: cls["fqn"] for cls in all_classes}
     class_parents: dict[str, list[str]] = {}
@@ -826,6 +877,8 @@ def index_repo(
             class_field_types=all_class_field_types,    # property-chain resolution
             class_parents=class_parents,         # inheritance walk for chain receiver
             method_param_types=all_method_param_types,  # param-receiver resolution
+            file_import_maps=all_file_import_maps,      # RC-A: per-file import maps
+            extends_map=class_parents,                  # RC-K: superclass chain walk
         )
 
         for edge in edges:
@@ -918,6 +971,9 @@ def index_repo(
             exposes_edges.append(ep["id"])
         for er in pr.entity_relations:
             has_relation_edges.append((er["source_class_id"], er["id"]))
+
+    # RC-H: Filter contains_method_edges to only include deduplicated method IDs
+    contains_method_edges = [(cid, mid) for cid, mid in contains_method_edges if mid in valid_method_ids]
 
     # Flush CONTAINS_CLASS edges
     for _batch_start in range(0, max(1, len(contains_class_edges)), _EDGE_BATCH_SIZE):

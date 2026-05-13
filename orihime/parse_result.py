@@ -43,3 +43,6 @@ class ParseResult:
     # method_fqn → {param_name → simple_type_name} — used by resolver to resolve
     # calls like param.method() where param is a function argument, not a class field
     method_param_types: dict[str, dict[str, str]] = field(default_factory=dict)
+    # file_id → {simple_name → fqn} — import map per source file, used by
+    # resolver (RC-A fix) for accurate call-site type disambiguation
+    file_import_maps: dict[str, dict[str, str]] = field(default_factory=dict)

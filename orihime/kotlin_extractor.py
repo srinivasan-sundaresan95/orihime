@@ -885,6 +885,9 @@ class KotlinExtractor:
                     rc = _find_rest_calls_in_node(tl_fn_body, src, method_id, repo_id)
                     rest_calls.extend(rc)
 
+        # Expose per-file import map for resolver RC-A disambiguation
+        file_import_maps: dict[str, dict[str, str]] = {file_id: imports}
+
         return ExtractResult(
             classes=classes,
             methods=methods,
@@ -894,6 +897,7 @@ class KotlinExtractor:
             inheritance_edges=inheritance_edges,
             class_field_types=class_field_types,
             method_param_types=method_param_types,
+            file_import_maps=file_import_maps,
         )
 
 

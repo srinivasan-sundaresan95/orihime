@@ -459,8 +459,9 @@ def _pass_c_event_listeners(conn, writer, repo_id: str, written: set[tuple[str, 
 # ---------------------------------------------------------------------------
 
 # Pointcut pattern: @annotation(varName)  — captures the parameter variable name
+# RC-I1: also captures FQNs like org.springframework.scheduling.annotation.Scheduled
 _AOP_ANNOTATION_POINTCUT_RE = re.compile(
-    r"@annotation\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)"
+    r"@annotation\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\)"
 )
 
 # Kotlin/Java parameter type extraction:
@@ -500,6 +501,11 @@ def _extract_annotation_name_from_source(
     if not m:
         return None
     var_name = m.group(1)
+
+    # RC-I1: if var_name is a FQN (contains dots), extract simple name directly —
+    # e.g. @annotation(org.springframework.scheduling.annotation.Scheduled) → "Scheduled"
+    if "." in var_name:
+        return var_name.rsplit(".", 1)[-1]
 
     # Step 2: find the type of that parameter variable in the same window
     if language == "kotlin":

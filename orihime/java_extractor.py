@@ -740,6 +740,9 @@ class JavaExtractor:
         # Build interface → implementation mapping for Spring beans
         result.impl_map = _extract_impl_map(root, source_bytes, package)
 
+        # Expose per-file import map for resolver RC-A disambiguation
+        result.file_import_maps[file_id] = _build_import_map(root, source_bytes)
+
         return result
 
     # ------------------------------------------------------------------

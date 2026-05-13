@@ -20,4 +20,8 @@ def walk_repo(root: Path) -> Iterator[tuple[Path, str]]:
             suffix = os.path.splitext(filename)[1]
             lang = ext_map.get(suffix)
             if lang is not None:
-                yield Path(dirpath) / filename, lang
+                full_path = Path(dirpath) / filename
+                # RC-B: skip test source directories (Maven/Gradle: src/test/java|kotlin)
+                if "/src/test/" in str(full_path):
+                    continue
+                yield full_path, lang

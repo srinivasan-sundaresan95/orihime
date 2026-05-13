@@ -49,6 +49,8 @@ def resolve_calls(
     class_field_types: dict[str, dict[str, str]] | None = None,  # property-chain resolution
     class_parents: dict[str, list[str]] | None = None,   # inheritance walk for chain receiver
     method_param_types: dict[str, dict[str, str]] | None = None,  # param-receiver resolution
+    file_import_maps: dict[str, dict[str, str]] | None = None,  # RC-A: file_id → {simple_class → fqn_prefix}
+    extends_map: dict[str, list[str]] | None = None,  # RC-K: class_fqn → list[parent_fqn]
 ) -> list[CallEdge]:
     """Walk all method bodies in *tree* and emit call edges.
 
@@ -83,6 +85,16 @@ def resolve_calls(
                       ``ClassName.method`` key rather than falling through to
                       the ambiguous suffix index.  Pass ``None`` (default) to
                       preserve existing behavior.
+        file_import_maps: Optional ``{file_id: {simple_class_name: fqn_prefix}}``
+                      mapping for RC-A import-based disambiguation.  When
+                      provided, suffix-index candidates for ambiguous class
+                      names are filtered to the imported package.
+        extends_map:  Optional ``{class_fqn: [parent_fqn, ...]}`` for RC-K
+                      EXTENDS chain walk.  When provided, ``_find_method_in_class_hierarchy``
+                      will walk up the inheritance chain if the direct class
+                      doesn't declare the method.
+                      TODO(indexer.py): pass extends_map from the accumulated
+                      extends_edges after Phase 2 class+method node writes.
 
     Returns:
         List of :class:`CallEdge` instances.
@@ -181,6 +193,14 @@ def resolve_calls(
 
     root = tree.root_node
 
+    # RC-A: resolve import map for this file (simple_class_name → fqn_prefix)
+    _caller_imports: dict[str, str] = (
+        file_import_maps.get(file_id, {}) if file_import_maps else {}
+    )
+
+    # RC-K: build reverse fqn index: method_id → fqn (needed for import filtering)
+    _fqn_reverse: dict[str, str] = {mid: fqn for fqn, mid in fqn_index.items()}
+
     # Walk the tree looking for method / function declarations
     for node in _walk_all(root):
         if node.type in ("method_declaration", "function_declaration"):
@@ -199,6 +219,9 @@ def resolve_calls(
                 class_by_simple_name=_class_by_simple_name,
                 class_parents=class_parents,
                 method_param_types=method_param_types,
+                caller_imports=_caller_imports,
+                fqn_reverse=_fqn_reverse,
+                extends_map=extends_map,
             )
         elif node.type == "constructor_declaration":
             # Java constructor body: treat as its class's <init> method
@@ -285,6 +308,9 @@ def _process_method_node(
     class_by_simple_name: "dict[str, str] | None" = None,
     class_parents: "dict[str, list[str]] | None" = None,
     method_param_types: "dict[str, dict[str, str]] | None" = None,
+    caller_imports: "dict[str, str] | None" = None,  # RC-A
+    fqn_reverse: "dict[str, str] | None" = None,     # RC-A: method_id → fqn
+    extends_map: "dict[str, list[str]] | None" = None,  # RC-K
 ) -> None:
     """Emit CallEdge objects for all call sites inside *method_node*."""
     caller_id = _find_enclosing_method(method_node, source_bytes, methods)
@@ -334,6 +360,9 @@ def _process_method_node(
                 caller_class_fqn=caller_class_fqn,
                 caller_fqn=caller_fqn,
                 method_param_types=method_param_types,
+                caller_imports=caller_imports,
+                fqn_reverse=fqn_reverse,
+                extends_map=extends_map,
             )
         elif node.type == "object_creation_expression":
             # Java: `new ClassName(...)` — emit a CALLS edge to ClassName.<init>
@@ -500,6 +529,33 @@ def _has_lowercase_nav_receiver(
     return True
 
 
+def _get_nav_receiver_var(inv_node, source_bytes: bytes) -> "str | None":
+    """Return the root receiver variable name for a navigated call, or None.
+
+    For ``walletApiClientWrapper.buyBitcoin(...)`` returns ``"walletApiClientWrapper"``.
+    For bare ``buyBitcoin(...)`` (no navigation) returns ``None``.
+
+    Used by RC-D field-type dispatch to identify the DI field being invoked.
+    """
+    children = list(inv_node.children)
+    # Kotlin: navigation_expression as first child
+    for child in children:
+        if child.type == "navigation_expression":
+            for sub in child.children:
+                if sub.type in ("identifier", "simple_identifier"):
+                    return _text(sub, source_bytes)
+            break
+    # Java: identifier DOT identifier (receiver is first identifier)
+    if (
+        len(children) >= 3
+        and children[0].type == "identifier"
+        and children[1].type == "."
+        and children[2].type == "identifier"
+    ):
+        return _text(children[0], source_bytes)
+    return None
+
+
 def _is_extension_function_callee(method_id: str, fqn_index: dict[str, str]) -> bool:
     """Return True if the method_id corresponds to a statically-dispatched Kotlin function.
 
@@ -567,6 +623,7 @@ def _resolve_chain_receiver_fqn(
     class_field_types: dict[str, dict[str, str]],
     class_by_simple_name: "dict[str, list[str]]",
     caller_param_types: "dict[str, str] | None" = None,
+    caller_imports: "dict[str, str] | None" = None,  # RC-A: simple_class → fqn_prefix
 ) -> "list[str]":
     """Return all candidate receiver class FQNs for a property-chain call.
 
@@ -575,16 +632,20 @@ def _resolve_chain_receiver_fqn(
     different packages), all candidates are returned so the caller can try each
     one and pick the first that has the target method.
 
-    Handles two cases:
+    Handles three cases:
     1. Direct chain: ``configurationProperties.abTest.testPeriod.isAppliesToTime(t)``
        Walks field types from the caller's class through each property hop.
     2. Lambda implicit receiver ``it``: ``list.firstOrNull { it.isAppliesToTime(t) }``
        Resolves by finding the outer call_expression's navigation chain, which
        gives us the collection field, whose stored element type IS ``it``'s type
        (we store List<Foo> as "Foo" in class_field_types).
+    3. Static call: ``Utility.calculatePerformancePoint(args)`` where ``Utility``
+       is a class simple name (not a field). (RC-E)
 
     caller_param_types: optional {param_name → simple_type} for the caller method —
        used as a fallback when the root var is not a class field but a function param.
+    caller_imports: optional {simple_class_name → fqn_prefix} from the file's
+       import declarations — used to disambiguate among multiple same-named classes.
     """
     nav_node = None
     for child in inv_node.children:
@@ -618,10 +679,28 @@ def _resolve_chain_receiver_fqn(
         if not root_type_simple and caller_param_types:
             root_type_simple = caller_param_types.get(root_var)
         if not root_type_simple:
-            return []
-        start_fqns = class_by_simple_name.get(root_type_simple, [])
-        if not start_fqns:
-            return []
+            # RC-E (Fix 3): treat root_var as a class name (static call like
+            # Utility.calculatePerformancePoint(args))
+            start_fqns = class_by_simple_name.get(root_var, [])
+            if not start_fqns:
+                return []
+        else:
+            start_fqns = class_by_simple_name.get(root_type_simple, [])
+            if not start_fqns:
+                return []
+
+        # RC-A (Fix 1, step 5): filter start_fqns by import when ambiguous
+        if caller_imports and len(start_fqns) > 1:
+            _key = root_type_simple or root_var
+            imported_prefix = caller_imports.get(_key, "")
+            if imported_prefix:
+                _pkg_prefix = imported_prefix.rsplit(".", 1)[0]
+                _filtered = [
+                    fqn for fqn in start_fqns
+                    if fqn == imported_prefix or fqn.startswith(_pkg_prefix)
+                ]
+                if _filtered:
+                    start_fqns = _filtered
 
     # Walk remaining field segments — try all candidate FQNs at each hop
     current_fqns = list(start_fqns)
@@ -724,8 +803,15 @@ def _find_method_in_class_hierarchy(
     fqn_index: dict[str, str],
     class_parents: dict[str, list[str]],
     max_depth: int = 5,
+    extends_map: "dict[str, list[str]] | None" = None,  # RC-K
 ) -> str | None:
-    """Return method_id for receiver_fqn.method_name, walking up the inheritance chain."""
+    """Return method_id for receiver_fqn.method_name, walking up the inheritance chain.
+
+    RC-K: When *extends_map* is provided, also walks the EXTENDS chain (superclass
+    hierarchy) so that calls to methods declared on a superclass are resolved even
+    when the receiver is typed as the subclass.  Guards against infinite recursion
+    with a depth limit of 10 hops.
+    """
     visited: set[str] = set()
     queue = [receiver_fqn]
     for _ in range(max_depth):
@@ -740,6 +826,11 @@ def _find_method_in_class_hierarchy(
             if candidate in fqn_index:
                 return fqn_index[candidate]
             next_queue.extend(class_parents.get(cls_fqn, []))
+            # RC-K: also walk up the EXTENDS (superclass) chain
+            if extends_map:
+                for parent_fqn in extends_map.get(cls_fqn, []):
+                    if parent_fqn not in visited:
+                        next_queue.append(parent_fqn)
         queue = next_queue
     return None
 
@@ -761,6 +852,9 @@ def _process_invocation(
     caller_class_fqn: "str | None" = None,
     caller_fqn: "str | None" = None,
     method_param_types: "dict[str, dict[str, str]] | None" = None,
+    caller_imports: "dict[str, str] | None" = None,   # RC-A
+    fqn_reverse: "dict[str, str] | None" = None,      # RC-A: method_id → fqn
+    extends_map: "dict[str, list[str]] | None" = None,  # RC-K
 ) -> None:
     """Emit one CallEdge for this invocation node."""
     name = _get_invocation_name(inv_node, source_bytes)
@@ -857,6 +951,56 @@ def _process_invocation(
     else:
         matches = raw_matches
 
+    # RC-A (Fix 1): Import-based disambiguation — when multiple classes share the
+    # same simple name (e.g. 9× ConditionConfig), filter suffix candidates to the
+    # package that the caller file explicitly imported.
+    if caller_imports and fqn_reverse and len(matches) > 1:
+        _import_filtered: list[str] = []
+        for mid in matches:
+            method_fqn = fqn_reverse.get(mid, "")
+            # class FQN = method_fqn without the last .methodName segment
+            class_fqn = method_fqn.rsplit(".", 1)[0]
+            class_simple = class_fqn.rsplit(".", 1)[-1]
+            imported_prefix = caller_imports.get(class_simple, "")
+            if not imported_prefix:
+                # No import for this class name — keep as candidate
+                _import_filtered.append(mid)
+            elif class_fqn == imported_prefix:
+                _import_filtered.append(mid)
+            else:
+                # Class is in a different package than the import — keep only if
+                # the package prefix matches (handles inner classes)
+                _pkg_prefix = imported_prefix.rsplit(".", 1)[0]
+                if class_fqn.startswith(_pkg_prefix):
+                    _import_filtered.append(mid)
+        if _import_filtered:
+            matches = _import_filtered
+
+    # RC-D (Fix 2): Field-type dispatch — when the receiver is a known DI field,
+    # restrict suffix-index matches to methods declared on that field's declared type.
+    # This prevents self-loops like WalletTradingServiceImpl.buyBitcoin routing to
+    # itself instead of walletApiClientWrapper.buyBitcoin.
+    if len(matches) > 1 and class_field_types and caller_class_fqn and fqn_reverse:
+        _receiver_var = _get_nav_receiver_var(inv_node, source_bytes)
+        if _receiver_var:
+            _field_type = class_field_types.get(caller_class_fqn, {}).get(_receiver_var)
+            if _field_type:
+                _field_filtered = [
+                    mid for mid in matches
+                    if fqn_reverse.get(mid, "").rsplit(".", 1)[0].endswith(_field_type)
+                    or fqn_reverse.get(mid, "").rsplit(".", 1)[0] == _field_type
+                ]
+                if _field_filtered:
+                    matches = _field_filtered
+
+    # RC-G (Fix 4): Overload disambiguation by argument count.
+    # TODO: Method dicts do not currently carry a param_count field. When the
+    # extractor is updated to populate param_count, add disambiguation here:
+    #   count_filtered = [mid for mid in matches if method_param_counts.get(mid) == _arg_count]
+    #   if count_filtered: matches = count_filtered
+    # This would fix generateAPIErrorResponse(HttpServletRequest, ...) vs
+    # generateAPIErrorResponse(WebRequest, ...) routing to the wrong overload.
+
     # Property-chain resolution: a.b.c.method() where static dispatch can be
     # determined by walking the declared field types of each intermediate object.
     # Runs when impl_index is active (Kotlin mode), the call has a nav chain, and
@@ -878,10 +1022,12 @@ def _process_invocation(
             inv_node, source_bytes, caller_class_fqn,
             class_field_types or {}, class_by_simple_name or {},
             caller_param_types=_caller_param_types,
+            caller_imports=caller_imports,
         )
         for receiver_fqn in receiver_fqns:
             hit_id = _find_method_in_class_hierarchy(
                 receiver_fqn, name, fqn_index, class_parents or {},
+                extends_map=extends_map,
             )
             if hit_id is not None:
                 _cap, _cpp = _arg_pos()
