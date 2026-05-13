@@ -286,7 +286,6 @@ def _delete_file_data(
     _w.execute("MATCH (:Class)-[e:EXTENDS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
     _w.execute("MATCH (c:Class)-[e:IMPLEMENTS]->(:Class) WHERE c.file_id = $fid DELETE e", p)
     _w.execute("MATCH (:Class)-[e:IMPLEMENTS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
-    _w.execute("MATCH (c:Class)-[e:HAS_RELATION]->(:EntityRelation) WHERE c.file_id = $fid DELETE e", p)
     _w.execute("MATCH (c:Class)-[e:CONTAINS_CLASS]->() WHERE c.file_id = $fid DELETE e", p)
     _w.execute("MATCH ()-[e:CONTAINS_CLASS]->(c:Class) WHERE c.file_id = $fid DELETE e", p)
     # Node cleanup — orphaned RestCalls/EntityRelations referencing this file's methods/classes
@@ -306,7 +305,7 @@ def _delete_file_data(
         )
     for cid in class_ids:
         _w.execute(
-            "MATCH (n:EntityRelation) WHERE n.source_class_id = $cid DELETE n",
+            "MATCH (n:EntityRelation) WHERE n.source_class_id = $cid DETACH DELETE n",
             {"cid": cid},
         )
     _w.execute("MATCH (m:Method) WHERE m.file_id = $fid DELETE m", p)
@@ -363,9 +362,8 @@ def _delete_repo_data(
         "MATCH (a:Class)-[r:IMPLEMENTS]->(b:Class) WHERE a.repo_id = $rid DELETE r", rid
     )
 
-    # Entity relation edges and nodes
-    _w.execute("MATCH (c:Class)-[r:HAS_RELATION]->(e:EntityRelation) WHERE c.repo_id = $rid DELETE r", rid)
-    _w.execute("MATCH (n:EntityRelation) WHERE n.repo_id = $rid DELETE n", rid)
+    # Entity relation edges and nodes — use DETACH DELETE to avoid edge-still-exists errors
+    _w.execute("MATCH (n:EntityRelation) WHERE n.repo_id = $rid DETACH DELETE n", rid)
 
     # HAS_BRANCH edges and Branch nodes
     _w.execute("MATCH (r:Repo)-[e:HAS_BRANCH]->(b:Branch) WHERE r.id = $rid DELETE e", rid)
@@ -699,6 +697,21 @@ def index_repo(
     # Also rebuild all_methods to reflect deduplication
     all_methods = [m for m in all_methods if m["id"] in valid_method_ids]
 
+    # RC-H: build canonical class ID map: fqn → id of the *kept* (first-seen) class node.
+    # Inheritance edges use child_id from the extractor; if a class was deduplicated, its
+    # original id may not exist in the DB. Remap all child_ids through this map.
+    canonical_class_id: dict[str, str] = {c["fqn"]: c["id"] for c in class_rows}
+    # Also build original-id → canonical-id for remapping inheritance edges
+    _all_class_id_to_fqn: dict[str, str] = {}
+    for pr in parse_results.values():
+        for cls in pr.classes:
+            _all_class_id_to_fqn[cls["id"]] = cls["fqn"]
+    _orig_to_canonical: dict[str, str] = {
+        orig_id: canonical_class_id[fqn]
+        for orig_id, fqn in _all_class_id_to_fqn.items()
+        if fqn in canonical_class_id
+    }
+
     # --- Flush File nodes (one transaction for entire table) ---
     if file_rows:
         writer.execute("BEGIN TRANSACTION")
@@ -785,18 +798,14 @@ def index_repo(
             )
         writer.execute("COMMIT")
 
-    # FQN → class_id for inheritance edge resolution (built after all Class nodes written)
-    fqn_to_class_id: dict[str, str] = {}
-    for pr in parse_results.values():
-        for cls in pr.classes:
-            fqn_to_class_id[cls["fqn"]] = cls["id"]
+    # FQN → class_id for inheritance edge resolution — use canonical IDs from RC-H dedup
+    fqn_to_class_id: dict[str, str] = dict(canonical_class_id)
 
     # -----------------------------------------------------------------------
     # Phase 3 — resolve call edges (serial — needs full fqn_index)
     # -----------------------------------------------------------------------
-    all_classes: list[dict] = []
-    for pr in parse_results.values():
-        all_classes.extend(pr.classes)
+    # Use deduplicated class_rows so all_classes only contains nodes actually in the DB
+    all_classes: list[dict] = list(class_rows)
     # N1: pass classes=all_classes to resolve_calls once resolver.py accepts the parameter
 
     fqn_index = build_fqn_index(all_methods)
@@ -1047,7 +1056,8 @@ def index_repo(
 
     for pr in parse_results.values():
         for edge in pr.inheritance_edges:
-            child_id   = edge["child_id"]
+            # RC-H: remap child_id to canonical (deduplicated) class ID
+            child_id   = _orig_to_canonical.get(edge["child_id"], edge["child_id"])
             parent_fqn = edge["parent_fqn"]
             edge_type  = edge["edge_type"]
             parent_id  = fqn_to_class_id.get(parent_fqn)
