@@ -2,7 +2,7 @@
 
 Spring (and similar DI frameworks) invoke certain methods via reflection or
 AOP proxies, making them invisible to the static resolver.  This pass emits
-synthetic CALLS edges for three such patterns after the main graph is built:
+synthetic CALLS edges for four such patterns after the main graph is built:
 
 Pass A — Bean Validation (@AssertTrue / @AssertFalse)
     When a Spring bean's field is annotated @Valid, the Bean Validation
@@ -29,12 +29,26 @@ Pass C — Spring Application Events (@EventListener)
     (or a supertype).  We match publishEvent call sites in the graph to
     @EventListener methods by the event class name.
 
-All three passes operate purely on the already-populated KuzuDB graph — no
-source re-reads required.  They are called from indexer.py after Phase 6.
+Pass D — Spring AOP @Around / @Before / @After aspects
+    When a method is annotated @Around/@Before/@After with a pointcut of the
+    form @annotation(varName) — where varName is a parameter of type
+    SomeAnnotation — Spring calls the advice for every method annotated with
+    @SomeAnnotation.  We emit synthetic CALLS edges from each such annotated
+    method → the advice method.
+
+    Detection: read the source file for each advice method, extract the
+    @annotation(...) parameter name from the pointcut string, find the
+    corresponding parameter's declared type from the source, then query the
+    graph for all methods in the repo bearing that annotation.
+
+All four passes operate on the already-populated KuzuDB graph.  Pass D also
+reads source files when parsing the pointcut string.  They are called from
+indexer.py after Phase 6.
 """
 from __future__ import annotations
 
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -61,12 +75,18 @@ def run_framework_pass(conn, writer, repo_id: str) -> dict[str, int]:
     a = _pass_a_assert_true(conn, writer, repo_id, written)
     b = _pass_b_filters(conn, writer, repo_id, written)
     c = _pass_c_event_listeners(conn, writer, repo_id, written)
+    d = _pass_d_aop_aspects(conn, writer, repo_id, written)
 
     log.info(
-        "framework_pass repo=%s  assert_true=%d  filter=%d  event_listener=%d",
-        repo_id, a, b, c,
+        "framework_pass repo=%s  assert_true=%d  filter=%d  event_listener=%d  aop_aspect=%d",
+        repo_id, a, b, c, d,
     )
-    return {"assert_true_edges": a, "filter_edges": b, "event_listener_edges": c}
+    return {
+        "assert_true_edges": a,
+        "filter_edges": b,
+        "event_listener_edges": c,
+        "aop_aspect_edges": d,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -430,5 +450,137 @@ def _pass_c_event_listeners(conn, writer, repo_id: str, written: set[tuple[str, 
     for pub_id in publisher_ids:
         for listener_id in all_listener_ids:
             edges.append((pub_id, listener_id, "publishEvent→listener"))
+
+    return _flush_edges(writer, edges, written)
+
+
+# ---------------------------------------------------------------------------
+# Pass D — Spring AOP @Around / @Before / @After aspects
+# ---------------------------------------------------------------------------
+
+# Pointcut pattern: @annotation(varName)  — captures the parameter variable name
+_AOP_ANNOTATION_POINTCUT_RE = re.compile(
+    r"@annotation\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)"
+)
+
+# Kotlin/Java parameter type extraction:
+# Kotlin: "varName: TypeName" or "varName: pkg.TypeName"
+# Java:   "TypeName varName" (space-separated before the last identifier)
+_KT_PARAM_TYPE_TEMPLATE = r"\b{var}\s*:\s*(?:[A-Za-z0-9_.]+\.)?([A-Za-z][A-Za-z0-9_]+)"
+_JAVA_PARAM_TYPE_TEMPLATE = r"(?:^|[\s,(<])(?:[A-Za-z0-9_.]+\.)?([A-Za-z][A-Za-z0-9_]+)\s+{var}\b"
+
+_AOP_ADVICE_ANNOTATIONS = frozenset({
+    "Around", "Before", "After", "AfterReturning", "AfterThrowing",
+})
+
+
+def _extract_annotation_name_from_source(
+    file_path: str,
+    line_start: int,
+    language: str,
+) -> str | None:
+    """Read the source file around the advice method to extract the target annotation name.
+
+    Scans from line_start-5 to line_start+40 to capture the @Around/... annotation
+    string argument and the parameter list.  Returns the simple annotation class name
+    that the pointcut targets, or None if it cannot be determined.
+    """
+    try:
+        with open(file_path, encoding="utf-8", errors="replace") as fh:
+            all_lines = fh.readlines()
+    except OSError:
+        return None
+
+    lo = max(0, line_start - 6)
+    hi = min(len(all_lines), line_start + 40)
+    window = "".join(all_lines[lo:hi])
+
+    # Step 1: find @annotation(varName) in the pointcut
+    m = _AOP_ANNOTATION_POINTCUT_RE.search(window)
+    if not m:
+        return None
+    var_name = m.group(1)
+
+    # Step 2: find the type of that parameter variable in the same window
+    if language == "kotlin":
+        pattern = _KT_PARAM_TYPE_TEMPLATE.replace("{var}", re.escape(var_name))
+    else:
+        pattern = _JAVA_PARAM_TYPE_TEMPLATE.replace("{var}", re.escape(var_name))
+    tm = re.search(pattern, window)
+
+    if not tm:
+        return None
+    return tm.group(1)
+
+
+def _pass_d_aop_aspects(conn, writer, repo_id: str, written: set[tuple[str, str]]) -> int:
+    """Emit CALLS edges from @SomeAnnotation methods → @Around/@Before/@After advice.
+
+    Strategy:
+    1. Find all methods in the repo annotated with Around/Before/After/AfterReturning/
+       AfterThrowing.  These are the AOP advice methods.
+    2. For each advice method, resolve its source file path and read the annotation
+       argument (pointcut string) to extract the @annotation(varName) pattern.
+    3. Determine the type name for varName from the parameter list in source.
+    4. Find all methods in the repo annotated with that type name.
+    5. Emit synthetic CALLS from each of those methods → the advice method.
+    """
+    # Step 1: collect advice methods with their file info
+    r_advice = conn.execute(
+        "MATCH (m:Method) "
+        "WHERE m.repo_id = $rid "
+        "RETURN m.id, m.name, m.annotations, m.line_start, m.file_id",
+        {"rid": repo_id},
+    )
+    advice_rows: list[tuple[str, str, list[str], int, str]] = []
+    while r_advice.has_next():
+        mid, name, annotations, line_start, file_id = r_advice.get_next()
+        ann_list = annotations if isinstance(annotations, list) else []
+        if _AOP_ADVICE_ANNOTATIONS.intersection(ann_list):
+            advice_rows.append((mid, name, ann_list, line_start or 0, file_id))
+
+    if not advice_rows:
+        return 0
+
+    # Build file_id → (path, language) map
+    file_ids = list({row[4] for row in advice_rows})
+    file_info: dict[str, tuple[str, str]] = {}
+    for fid in file_ids:
+        r_f = conn.execute(
+            "MATCH (f:File) WHERE f.id = $fid RETURN f.path, f.language",
+            {"fid": fid},
+        )
+        if r_f.has_next():
+            fpath, flang = r_f.get_next()
+            file_info[fid] = (fpath, flang)
+
+    # Step 2-5: for each advice method, resolve the targeted annotation and wire edges
+    edges: list[tuple[str, str, str]] = []
+
+    for advice_mid, advice_name, _anns, line_start, file_id in advice_rows:
+        fpath, flang = file_info.get(file_id, ("", ""))
+        if not fpath:
+            continue
+
+        ann_name = _extract_annotation_name_from_source(fpath, line_start, flang)
+        if not ann_name:
+            log.debug(
+                "pass_d: could not extract annotation name from %s line %d",
+                fpath, line_start,
+            )
+            continue
+
+        log.debug("pass_d: advice=%s targets @%s", advice_name, ann_name)
+
+        # Find all methods in the repo bearing this annotation
+        r_targets = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid RETURN m.id, m.annotations",
+            {"rid": repo_id},
+        )
+        while r_targets.has_next():
+            target_mid, target_anns = r_targets.get_next()
+            target_ann_list = target_anns if isinstance(target_anns, list) else []
+            if ann_name in target_ann_list and target_mid != advice_mid:
+                edges.append((target_mid, advice_mid, advice_name))
 
     return _flush_edges(writer, edges, written)

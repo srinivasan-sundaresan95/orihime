@@ -8,6 +8,8 @@ Each pass has:
 from __future__ import annotations
 
 import os
+import tempfile
+import textwrap
 import uuid
 import pytest
 
@@ -23,8 +25,9 @@ def _make_db():
     # Minimal schema — only the node/edge types used by framework_pass
     stmts = [
         "CREATE NODE TABLE Repo(id STRING, name STRING, PRIMARY KEY(id))",
+        "CREATE NODE TABLE File(id STRING, path STRING, language STRING, repo_id STRING, PRIMARY KEY(id))",
         "CREATE NODE TABLE Class(id STRING, name STRING, fqn STRING, repo_id STRING, is_interface BOOLEAN, is_object BOOLEAN, annotations STRING[], PRIMARY KEY(id))",
-        "CREATE NODE TABLE Method(id STRING, name STRING, fqn STRING, class_id STRING, repo_id STRING, annotations STRING[], PRIMARY KEY(id))",
+        "CREATE NODE TABLE Method(id STRING, name STRING, fqn STRING, class_id STRING, repo_id STRING, annotations STRING[], file_id STRING, line_start INT64, PRIMARY KEY(id))",
         "CREATE NODE TABLE Endpoint(id STRING, path STRING, http_method STRING, handler_method_id STRING, repo_id STRING, PRIMARY KEY(id))",
         "CREATE NODE TABLE RestCall(id STRING, http_method STRING, url_pattern STRING, callee_name STRING, caller_method_id STRING, repo_id STRING, PRIMARY KEY(id))",
         "CREATE REL TABLE CALLS(FROM Method TO Method, callee_name STRING, caller_arg_pos INT64, callee_param_pos INT64)",
@@ -53,7 +56,12 @@ class _FakeWriter:
             self._conn.execute(query)
 
 
+_METHOD_DEFAULTS = {"file_id": "", "line_start": 0}
+
+
 def _insert(conn, tbl: str, row: dict):
+    if tbl == "Method":
+        row = {**_METHOD_DEFAULTS, **row}
     props = ", ".join(f"{k}: ${k}" for k in row.keys())
     conn.execute(f"CREATE (:{tbl} {{{props}}})", row)
 
@@ -571,3 +579,238 @@ class TestLivePcapp:
                 missing.append(path)
 
         assert not missing, f"These endpoints lack edge to LoggingFilter.doFilterInternal: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Pass D — Spring AOP @Around aspects
+# ---------------------------------------------------------------------------
+
+class TestPassDAopAspects:
+    def _setup(self):
+        db, conn = _make_db()
+        writer = _FakeWriter(conn)
+        repo_id = _id()
+        _insert(conn, "Repo", {"id": repo_id, "name": "test-repo"})
+        return db, conn, writer, repo_id
+
+    def test_emits_edges_from_annotated_methods_to_advice(self, tmp_path):
+        """Methods annotated with @MyAnnotation should get CALLS edges to the @Around advice."""
+        db, conn, writer, repo_id = self._setup()
+
+        # Write a fake Kotlin source file with the aspect method
+        aspect_src = textwrap.dedent("""\
+            @Aspect
+            @Component
+            class MyAspect {
+                @Around(value = "@annotation(myAnnotation) && args(..)")
+                fun processControl(
+                    joinPoint: ProceedingJoinPoint,
+                    myAnnotation: MyAnnotation,
+                ): Any {
+                    return joinPoint.proceed()
+                }
+            }
+        """)
+        src_file = tmp_path / "MyAspect.kt"
+        src_file.write_text(aspect_src)
+
+        file_id = _id()
+        _insert(conn, "File", {"id": file_id, "path": str(src_file), "language": "kotlin", "repo_id": repo_id})
+
+        # Advice method (line_start=4 to match line with @Around)
+        advice_mid = _id()
+        _insert(conn, "Method", {
+            "id": advice_mid, "name": "processControl",
+            "fqn": "com.example.MyAspect.processControl",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["Around"],
+            "file_id": file_id, "line_start": 4,
+        })
+
+        # Two target methods annotated with @MyAnnotation
+        target1 = _id()
+        target2 = _id()
+        _insert(conn, "Method", {
+            "id": target1, "name": "doAction",
+            "fqn": "com.example.Controller.doAction",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["MyAnnotation", "GetMapping"],
+        })
+        _insert(conn, "Method", {
+            "id": target2, "name": "postAction",
+            "fqn": "com.example.Controller.postAction",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["MyAnnotation", "PostMapping"],
+        })
+
+        # Method without the annotation — should NOT get an edge
+        unrelated = _id()
+        _insert(conn, "Method", {
+            "id": unrelated, "name": "healthCheck",
+            "fqn": "com.example.Controller.healthCheck",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["GetMapping"],
+        })
+
+        from orihime.framework_pass import _pass_d_aop_aspects, _existing_call_pairs
+        written = _existing_call_pairs(conn, repo_id)
+        count = _pass_d_aop_aspects(conn, writer, repo_id, written)
+
+        assert count == 2, f"Expected 2 edges, got {count}"
+
+        for target_id in (target1, target2):
+            r = conn.execute(
+                "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.id = $a AND b.id = $b RETURN count(*)",
+                {"a": target_id, "b": advice_mid},
+            )
+            assert r.get_next()[0] == 1, f"Missing edge from {target_id} to advice"
+
+        # Unrelated method should have no edge to advice
+        r2 = conn.execute(
+            "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.id = $a AND b.id = $b RETURN count(*)",
+            {"a": unrelated, "b": advice_mid},
+        )
+        assert r2.get_next()[0] == 0
+
+    def test_no_edges_when_no_annotation_pointcut(self, tmp_path):
+        """@Around with a non-@annotation pointcut should emit no edges."""
+        db, conn, writer, repo_id = self._setup()
+
+        aspect_src = textwrap.dedent("""\
+            @Aspect
+            class TimingAspect {
+                @Around("execution(* com.example.service.*.*(..))")
+                fun timeMethod(joinPoint: ProceedingJoinPoint): Any = joinPoint.proceed()
+            }
+        """)
+        src_file = tmp_path / "TimingAspect.kt"
+        src_file.write_text(aspect_src)
+
+        file_id = _id()
+        _insert(conn, "File", {"id": file_id, "path": str(src_file), "language": "kotlin", "repo_id": repo_id})
+
+        advice_mid = _id()
+        _insert(conn, "Method", {
+            "id": advice_mid, "name": "timeMethod",
+            "fqn": "com.example.TimingAspect.timeMethod",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["Around"],
+            "file_id": file_id, "line_start": 3,
+        })
+
+        from orihime.framework_pass import _pass_d_aop_aspects, _existing_call_pairs
+        written = _existing_call_pairs(conn, repo_id)
+        count = _pass_d_aop_aspects(conn, writer, repo_id, written)
+        assert count == 0
+
+    def test_no_edges_when_no_around_methods(self):
+        """Repos with no @Around/@Before/@After methods produce 0 edges."""
+        db, conn, writer, repo_id = self._setup()
+        mid = _id()
+        _insert(conn, "Method", {
+            "id": mid, "name": "doWork",
+            "fqn": "com.example.S.doWork",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["Transactional"],
+        })
+        from orihime.framework_pass import _pass_d_aop_aspects, _existing_call_pairs
+        written = _existing_call_pairs(conn, repo_id)
+        assert _pass_d_aop_aspects(conn, writer, repo_id, written) == 0
+
+    def test_deduplication(self, tmp_path):
+        """Running pass D twice on the same DB should not create duplicate edges."""
+        db, conn, writer, repo_id = self._setup()
+
+        aspect_src = textwrap.dedent("""\
+            @Aspect
+            class MyAspect {
+                @Around("@annotation(ann) && args(..)")
+                fun doAround(jp: ProceedingJoinPoint, ann: FlagAnnotation): Any = jp.proceed()
+            }
+        """)
+        src_file = tmp_path / "MyAspect.kt"
+        src_file.write_text(aspect_src)
+
+        file_id = _id()
+        _insert(conn, "File", {"id": file_id, "path": str(src_file), "language": "kotlin", "repo_id": repo_id})
+
+        advice_mid = _id()
+        _insert(conn, "Method", {
+            "id": advice_mid, "name": "doAround",
+            "fqn": "com.example.MyAspect.doAround",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["Around"],
+            "file_id": file_id, "line_start": 3,
+        })
+        target_mid = _id()
+        _insert(conn, "Method", {
+            "id": target_mid, "name": "flaggedMethod",
+            "fqn": "com.example.Ctrl.flaggedMethod",
+            "class_id": _id(), "repo_id": repo_id,
+            "annotations": ["FlagAnnotation"],
+        })
+
+        from orihime.framework_pass import _pass_d_aop_aspects, _existing_call_pairs
+        written = _existing_call_pairs(conn, repo_id)
+        count1 = _pass_d_aop_aspects(conn, writer, repo_id, written)
+        count2 = _pass_d_aop_aspects(conn, writer, repo_id, written)
+        assert count1 == 1
+        assert count2 == 0, "Second run should emit 0 (already in written set)"
+
+        r = conn.execute(
+            "MATCH (a:Method)-[:CALLS]->(b:Method) WHERE a.id = $a AND b.id = $b RETURN count(*)",
+            {"a": target_mid, "b": advice_mid},
+        )
+        assert r.get_next()[0] == 1
+
+
+class TestPassDIntegration:
+    """Live-DB tests for Pass D against the pointclubapp-api index."""
+
+    def test_card_state_control_aspect_wired(self):
+        """processCardStateControl should have CALLS edges from all @CardStateControlled methods."""
+        conn = _live_conn()
+        repo_id = _pcapp_repo_id(conn)
+        assert repo_id
+
+        r = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND m.name = 'processCardStateControl' RETURN m.id",
+            {"rid": repo_id},
+        )
+        if not r.has_next():
+            pytest.skip("processCardStateControl not found — re-index first")
+        advice_id = r.get_next()[0]
+
+        # Count @CardStateControlled methods
+        r2 = conn.execute(
+            "MATCH (m:Method) WHERE m.repo_id = $rid AND $ann IN m.annotations RETURN count(*)",
+            {"rid": repo_id, "ann": "CardStateControlled"},
+        )
+        csc_count = r2.get_next()[0]
+        assert csc_count > 0, "No @CardStateControlled methods found"
+
+        # Count CALLS edges to the advice
+        r3 = conn.execute(
+            "MATCH (caller:Method)-[:CALLS]->(advice:Method) WHERE advice.id = $aid RETURN count(*)",
+            {"aid": advice_id},
+        )
+        edge_count = r3.get_next()[0]
+        assert edge_count == csc_count, (
+            f"Expected {csc_count} CALLS edges to processCardStateControl, got {edge_count}"
+        )
+
+    def test_post_auto_deposit_reaches_aspect(self):
+        """postAutoDepositInfo should have a direct CALLS edge to processCardStateControl."""
+        conn = _live_conn()
+        repo_id = _pcapp_repo_id(conn)
+        assert repo_id
+
+        r = conn.execute(
+            "MATCH (caller:Method)-[:CALLS]->(advice:Method) "
+            "WHERE caller.repo_id = $rid "
+            "AND caller.name = 'postAutoDepositInfo' "
+            "AND advice.name = 'processCardStateControl' "
+            "RETURN count(*)",
+            {"rid": repo_id},
+        )
+        assert r.get_next()[0] == 1, "postAutoDepositInfo → processCardStateControl edge missing"
