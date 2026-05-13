@@ -436,6 +436,40 @@ def _is_object_style_call(inv_node, source_bytes: bytes) -> bool:
     return False
 
 
+def _has_lowercase_nav_receiver(inv_node, source_bytes: bytes) -> bool:
+    """Return True when the call has a qualified receiver that starts lowercase.
+
+    e.g. ``someService.doWork()`` or ``walletService.getBalance()``.
+    These are DI-injected variable calls and must go through the impl_index gate
+    even when only one method by that name exists in the index.
+
+    Two AST shapes:
+    - Kotlin call_expression: first child is navigation_expression whose first
+      identifier child is the receiver.
+    - Java method_invocation: first child is an identifier (the receiver variable)
+      followed by a dot and the method name.
+    """
+    children = list(inv_node.children)
+    # Kotlin: navigation_expression as first child
+    for child in children:
+        if child.type == "navigation_expression":
+            for sub in child.children:
+                if sub.type in ("identifier", "simple_identifier"):
+                    text = _text(sub, source_bytes)
+                    return bool(text) and text[0].islower()
+            break
+    # Java: identifier DOT identifier pattern (receiver is first identifier child)
+    if (
+        len(children) >= 3
+        and children[0].type == "identifier"
+        and children[1].type == "."
+        and children[2].type == "identifier"
+    ):
+        text = _text(children[0], source_bytes)
+        return bool(text) and text[0].islower()
+    return False
+
+
 def _is_extension_function_callee(method_id: str, fqn_index: dict[str, str]) -> bool:
     """Return True if the method_id corresponds to a statically-dispatched Kotlin function.
 
@@ -736,11 +770,16 @@ def _process_invocation(
     #    (e.g. ``it.isAppliesToTime(t)`` on an abstract-class instance).
     raw_matches = suffix_index.get(name, [])
     if impl_index is not None and not _is_object_style_call(inv_node, source_bytes):
+        # The "unambiguous" exception (len == 1) is safe only when the call has
+        # no lowercase-receiver nav expression.  A lowercase receiver (e.g.
+        # someService.doWork()) is a DI-injected variable call and must go
+        # through the impl_index gate even if only one implementation exists.
+        _allow_unambiguous = not _has_lowercase_nav_receiver(inv_node, source_bytes)
         matches = [
             mid for mid in raw_matches
             if mid in local_method_ids
             or (fqn_index is not None and _is_extension_function_callee(mid, fqn_index))
-            or len(raw_matches) == 1  # unambiguous — only one class declares this name
+            or (_allow_unambiguous and len(raw_matches) == 1)
         ]
         # Remove self-referential matches: a method calling itself by name is a
         # legitimate pattern (recursion), but here the caller's own method sharing
