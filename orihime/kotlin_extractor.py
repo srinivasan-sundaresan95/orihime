@@ -115,13 +115,24 @@ def _string_literal_text(node, src: bytes) -> str:
 
 
 def _annotation_arg(annotation_node, src: bytes) -> str | None:
-    """Return the first string literal argument of an annotation, if any.
+    """Return the first string literal argument of an annotation, or None.
 
-    Handles three forms:
-    1. @GetMapping("/path")                   — positional string_literal
-    2. @GetMapping(value = ["/path"])          — named arg with collection_literal
-    3. @GetMapping(path = ["/path"])           — named arg with collection_literal
+    Use _annotation_args() to get all values (e.g. multi-path @GetMapping).
     """
+    args = _annotation_args(annotation_node, src)
+    return args[0] if args else None
+
+
+def _annotation_args(annotation_node, src: bytes) -> list[str]:
+    """Return ALL string literal arguments of an annotation.
+
+    Handles:
+    1. @GetMapping("/path")                      — single positional string
+    2. @GetMapping("/v5/path", "/v6/path")        — multiple positional strings
+    3. @GetMapping(value = ["/v5/p", "/v6/p"])   — named array arg
+    4. @GetMapping(path = ["/v5/p", "/v6/p"])    — named array arg
+    """
+    results: list[str] = []
     for child in annotation_node.children:
         if child.type == "constructor_invocation":
             val_args = _child_by_type(child, "value_arguments")
@@ -129,27 +140,21 @@ def _annotation_arg(annotation_node, src: bytes) -> str | None:
                 for va in val_args.children:
                     if va.type != "value_argument":
                         continue
-                    # Check for named argument: value_argument may contain a
-                    # simple_identifier label ("value" or "path") followed by "="
-                    # and then an expression.  Walk children to detect this.
                     label: str | None = None
                     expr_node = None
                     for vac in va.children:
                         if vac.type == "simple_identifier" and label is None:
                             label = _node_text(vac, src)
                         elif vac.type == "string_literal":
-                            # Positional or unlabelled string arg
-                            return _string_literal_text(vac, src)
+                            results.append(_string_literal_text(vac, src))
                         elif vac.type == "collection_literal":
                             expr_node = vac
-                    # If we found a collection_literal, extract first string from it
                     if expr_node is not None and expr_node.type == "collection_literal":
-                        # Only use it if unnamed or named with value/path
                         if label is None or label in ("value", "path"):
                             for cl_child in expr_node.children:
                                 if cl_child.type == "string_literal":
-                                    return _string_literal_text(cl_child, src)
-    return None
+                                    results.append(_string_literal_text(cl_child, src))
+    return results
 
 
 def _is_suspend(modifiers_node, src: bytes) -> bool:
@@ -767,22 +772,24 @@ class KotlinExtractor:
                     "io_parallel_wrapper": fn_io["parallel_wrapper"],
                 })
 
-                # Detect endpoint annotations
+                # Detect endpoint annotations — emit one Endpoint per path value
+                # (@GetMapping(["/v5/foo", "/v6/foo"]) → two Endpoint nodes)
                 for ann_node in _iter_annotation_nodes(fn_modifiers):
                     ann_name = _annotation_name(ann_node, src)
                     if ann_name in _MAPPING_TO_METHOD:
                         http_method = _MAPPING_TO_METHOD[ann_name]
-                        ann_path = _annotation_arg(ann_node, src) or ""
-                        full_path = class_prefix.rstrip("/") + "/" + ann_path.lstrip("/") if ann_path else class_prefix
-                        full_path = full_path or "/"
-                        endpoints.append({
-                            "id": str(uuid.uuid4()),
-                            "http_method": http_method,
-                            "path": full_path,
-                            "path_regex": _path_regex(full_path),
-                            "handler_method_id": method_id,
-                            "repo_id": repo_id,
-                        })
+                        ann_paths = _annotation_args(ann_node, src) or [""]
+                        for ann_path in ann_paths:
+                            full_path = class_prefix.rstrip("/") + "/" + ann_path.lstrip("/") if ann_path else class_prefix
+                            full_path = full_path or "/"
+                            endpoints.append({
+                                "id": str(uuid.uuid4()),
+                                "http_method": http_method,
+                                "path": full_path,
+                                "path_regex": _path_regex(full_path),
+                                "handler_method_id": method_id,
+                                "repo_id": repo_id,
+                            })
 
                 # Detect RestClient / WebClient calls in the function body
                 if fn_body:
