@@ -148,6 +148,76 @@ def _extract_annotation_info(
     return name, value
 
 
+def _extract_annotation_values(
+    annotation_node, source_bytes: bytes, constant_index: "dict[str, str] | None" = None
+) -> tuple[str, list[str]]:
+    """Return (annotation_name, all_path_values) — handles multi-path arrays.
+
+    @GetMapping({"/v5/foo", "/v6/foo"}) returns ["/v5/foo", "/v6/foo"].
+    Falls back to _extract_annotation_info behaviour for single values.
+    """
+    name = ""
+    values: list[str] = []
+
+    def _resolve_field_access(node) -> str:
+        raw = _text(node, source_bytes)
+        if constant_index:
+            return constant_index.get(raw, "")
+        return ""
+
+    for child in annotation_node.children:
+        if child.type == "identifier":
+            name = _text(child, source_bytes)
+        elif child.type == "annotation_argument_list":
+            for arg in child.children:
+                if arg.type == "string_literal":
+                    frag = _find_first_child_of_type(arg, "string_fragment")
+                    if frag:
+                        values.append(_text(frag, source_bytes))
+                    break
+                elif arg.type == "field_access":
+                    v = _resolve_field_access(arg)
+                    if v:
+                        values.append(v)
+                    break
+                elif arg.type == "element_value_pair":
+                    pair_children = arg.children
+                    key_nodes = [c for c in pair_children if c.type == "identifier"]
+                    val_nodes = [
+                        c for c in pair_children
+                        if c.type in (
+                            "string_literal", "array_initializer",
+                            "element_value_array_initializer", "field_access",
+                        )
+                    ]
+                    if key_nodes and key_nodes[0].is_named:
+                        key_text = _text(key_nodes[0], source_bytes)
+                        if key_text in ("value", "path") and val_nodes:
+                            val_node = val_nodes[0]
+                            if val_node.type == "field_access":
+                                v = _resolve_field_access(val_node)
+                                if v:
+                                    values.append(v)
+                            elif val_node.type in (
+                                "array_initializer", "element_value_array_initializer"
+                            ):
+                                for arr_child in val_node.children:
+                                    if arr_child.type == "string_literal":
+                                        frag = _find_first_child_of_type(arr_child, "string_fragment")
+                                        if frag:
+                                            values.append(_text(frag, source_bytes))
+                                    elif arr_child.type == "field_access":
+                                        v = _resolve_field_access(arr_child)
+                                        if v:
+                                            values.append(v)
+                            else:
+                                frag = _find_first_child_of_type(val_node, "string_fragment")
+                                if frag:
+                                    values.append(_text(frag, source_bytes))
+                            break
+    return name, values
+
+
 def _collect_annotations(modifiers_node, source_bytes: bytes) -> list[str]:
     """Collect annotation names from a modifiers node."""
     names = []
@@ -934,29 +1004,29 @@ class JavaExtractor:
             }
         )
 
-        # Check for endpoint annotations
+        # Check for endpoint annotations — emit one Endpoint per path value
         if modifiers_node:
             for ann_child in modifiers_node.children:
                 if ann_child.type in ("marker_annotation", "annotation"):
-                    ann_name, ann_value = _extract_annotation_info(
+                    ann_name, ann_values = _extract_annotation_values(
                         ann_child, source_bytes, constant_index
                     )
                     if ann_name in _ENDPOINT_ANNOTATIONS:
                         http_method = _infer_http_method_from_annotation(
                             ann_name, ann_child, source_bytes
                         )
-                        # Combine class prefix with method path
-                        full_path = class_path_prefix.rstrip("/") + ann_value
-                        result.endpoints.append(
-                            {
-                                "id": str(uuid.uuid4()),
-                                "http_method": http_method,
-                                "path": full_path,
-                                "path_regex": compile_path_regex(full_path),
-                                "handler_method_id": method_id,
-                                "repo_id": repo_id,
-                            }
-                        )
+                        for ann_value in ann_values or [""]:
+                            full_path = class_path_prefix.rstrip("/") + ann_value
+                            result.endpoints.append(
+                                {
+                                    "id": str(uuid.uuid4()),
+                                    "http_method": http_method,
+                                    "path": full_path,
+                                    "path_regex": compile_path_regex(full_path),
+                                    "handler_method_id": method_id,
+                                    "repo_id": repo_id,
+                                }
+                            )
 
         # Scan method body for RestTemplate/WebClient/RestClient calls
         if body_node:
