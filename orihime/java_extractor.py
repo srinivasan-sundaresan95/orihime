@@ -210,6 +210,12 @@ def _extract_annotation_values(
                                         v = _resolve_field_access(arr_child)
                                         if v:
                                             values.append(v)
+                                    elif arr_child.type == "identifier" and constant_index:
+                                        # Bare identifier from static import, e.g. AGREEMENT
+                                        bare = _text(arr_child, source_bytes)
+                                        v = constant_index.get(bare, "")
+                                        if v:
+                                            values.append(v)
                             else:
                                 frag = _find_first_child_of_type(val_node, "string_fragment")
                                 if frag:
@@ -775,6 +781,17 @@ class JavaExtractor:
 
         # Build import map once for the whole file (used by _extract_inheritance)
         import_map = _build_import_map(root, source_bytes)
+
+        # Augment constant_index with bare-name keys resolved via static imports.
+        # Pattern: `import static pkg.RequestMapping.AGREEMENT` + `constant_index`
+        # having `RequestMapping.AGREEMENT="/agreement"` → add `AGREEMENT="/agreement"`.
+        # This allows @GetMapping(path = {AGREEMENT, AGREEMENT_SLASH}) to resolve.
+        for simple_name, fqn in import_map.items():
+            class_and_field = fqn.rsplit(".", 1)
+            if len(class_and_field) == 2:
+                qualified_key = f"{class_and_field[0].rsplit('.', 1)[-1]}.{simple_name}"
+                if qualified_key in constant_index and simple_name not in constant_index:
+                    constant_index[simple_name] = constant_index[qualified_key]
 
         # --- Pass 2: extract classes/methods/endpoints with resolved constants ---
         for node in _walk_all(root):
