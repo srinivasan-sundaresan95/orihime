@@ -154,14 +154,18 @@ def resolve_calls(
         {m["id"] for m in methods} if impl_index is not None else set()
     )
 
-    # Build simple class name → class FQN index for property-chain resolution.
-    # Used by _resolve_chain_receiver_fqn to look up intermediate field types.
-    _class_by_simple_name: dict[str, str] = {}
+    # Build simple class name → list[class FQN] for property-chain resolution.
+    # Stores ALL FQNs for a given simple name so that when multiple classes share
+    # the same short name (e.g. 9× ConditionConfig in different packages), every
+    # candidate is tried during chain resolution rather than only the first-seen.
+    _class_by_simple_name: dict[str, list[str]] = {}
     for fqn in fqn_index:
         class_fqn = fqn.rsplit(".", 1)[0]
         simple = class_fqn.rsplit(".", 1)[-1]
-        if simple and simple not in _class_by_simple_name:
-            _class_by_simple_name[simple] = class_fqn
+        if simple:
+            lst = _class_by_simple_name.setdefault(simple, [])
+            if class_fqn not in lst:
+                lst.append(class_fqn)
 
     # Build a lookup from simple class name → <init> method_id for
     # matching Java constructor_declaration nodes to their synthetic <init>.
@@ -561,10 +565,15 @@ def _resolve_chain_receiver_fqn(
     source_bytes: bytes,
     caller_class_fqn: str,
     class_field_types: dict[str, dict[str, str]],
-    class_by_simple_name: dict[str, str],
+    class_by_simple_name: "dict[str, list[str]]",
     caller_param_types: "dict[str, str] | None" = None,
-) -> str | None:
-    """Return the FQN of the receiver class for a property-chain call, or None.
+) -> "list[str]":
+    """Return all candidate receiver class FQNs for a property-chain call.
+
+    Returns a list (possibly empty) of FQNs to try as the receiver class.
+    When a simple class name maps to multiple FQNs (e.g. 9× ConditionConfig in
+    different packages), all candidates are returned so the caller can try each
+    one and pick the first that has the target method.
 
     Handles two cases:
     1. Direct chain: ``configurationProperties.abTest.testPeriod.isAppliesToTime(t)``
@@ -583,26 +592,23 @@ def _resolve_chain_receiver_fqn(
             nav_node = child
             break
     if nav_node is None:
-        return None
+        return []
 
     chain = _collect_nav_chain(nav_node, source_bytes)
     # chain = [root_var, seg1, seg2, ..., method_name]
     if len(chain) < 2:
-        return None
+        return []
 
     # Case 2: receiver is "it" (lambda implicit parameter)
     if chain[0] == "it" and len(chain) == 2:
-        # Walk up the AST to find the outer call_expression that owns this lambda
-        # The pattern is: outer_call(nav_chain, annotated_lambda)
-        # The nav_chain's last field gives us the collection field name.
-        outer_receiver_fqn = _resolve_lambda_it_receiver(
+        candidates = _resolve_lambda_it_receiver(
             inv_node, source_bytes, caller_class_fqn, class_field_types, class_by_simple_name
         )
-        return outer_receiver_fqn
+        return candidates
 
     segments = chain[:-1]  # drop method name
     if segments and segments[0] in ("this", "super"):
-        current_fqn = caller_class_fqn
+        start_fqns = [caller_class_fqn]
         segments = segments[1:]
     else:
         root_var = segments[0]
@@ -612,22 +618,27 @@ def _resolve_chain_receiver_fqn(
         if not root_type_simple and caller_param_types:
             root_type_simple = caller_param_types.get(root_var)
         if not root_type_simple:
-            return None
-        current_fqn = class_by_simple_name.get(root_type_simple)
-        if not current_fqn:
-            return None
+            return []
+        start_fqns = class_by_simple_name.get(root_type_simple, [])
+        if not start_fqns:
+            return []
 
-    # Walk remaining field segments
+    # Walk remaining field segments — try all candidate FQNs at each hop
+    current_fqns = list(start_fqns)
     for seg in segments:
-        field_map = class_field_types.get(current_fqn, {})
-        next_simple = field_map.get(seg)
-        if not next_simple:
-            return None
-        current_fqn = class_by_simple_name.get(next_simple)
-        if not current_fqn:
-            return None
+        next_fqns: list[str] = []
+        for cfqn in current_fqns:
+            field_map = class_field_types.get(cfqn, {})
+            next_simple = field_map.get(seg)
+            if next_simple:
+                for candidate in class_by_simple_name.get(next_simple, []):
+                    if candidate not in next_fqns:
+                        next_fqns.append(candidate)
+        if not next_fqns:
+            return []
+        current_fqns = next_fqns
 
-    return current_fqn
+    return current_fqns
 
 
 def _resolve_lambda_it_receiver(
@@ -635,9 +646,11 @@ def _resolve_lambda_it_receiver(
     source_bytes: bytes,
     caller_class_fqn: str,
     class_field_types: dict[str, dict[str, str]],
-    class_by_simple_name: dict[str, str],
-) -> str | None:
+    class_by_simple_name: "dict[str, list[str]]",
+) -> "list[str]":
     """Resolve the type of ``it`` in a lambda by inspecting the outer call chain.
+
+    Returns a list of candidate FQNs (empty if not resolvable).
 
     For ``configurationProperties.displays.firstOrNull { it.isAppliesToTime(t) }``,
     ``it`` is an element of ``displays``.  We stored ``displays`` with its element
@@ -647,15 +660,15 @@ def _resolve_lambda_it_receiver(
     # Walk up: inv_node → lambda_literal → annotated_lambda → call_expression (outer)
     node = inv_node.parent  # lambda_literal
     if node is None:
-        return None
+        return []
     if node.type == "lambda_literal":
         node = node.parent  # annotated_lambda or call_expression
     if node is None:
-        return None
+        return []
     if node.type == "annotated_lambda":
         node = node.parent  # call_expression (outer)
     if node is None or node.type != "call_expression":
-        return None
+        return []
 
     # The outer call_expression has a navigation_expression as its first child
     # e.g. "configurationProperties.displays.firstOrNull"
@@ -665,40 +678,44 @@ def _resolve_lambda_it_receiver(
             outer_nav = child
             break
     if outer_nav is None:
-        return None
+        return []
 
     # The outer chain is e.g. ["configurationProperties", "displays", "firstOrNull"]
     # We want all but the last segment (the collection method like firstOrNull/filter/map)
     outer_chain = _collect_nav_chain(outer_nav, source_bytes)
     if len(outer_chain) < 2:
-        return None
+        return []
     # Drop the last item (the higher-order function name like "firstOrNull")
     collection_chain = outer_chain[:-1]
 
-    # Now resolve collection_chain exactly like a normal property chain
+    # Resolve collection_chain exactly like a normal property chain, tracking all candidates
     if collection_chain[0] in ("this", "super"):
-        current_fqn = caller_class_fqn
+        current_fqns = [caller_class_fqn]
         collection_chain = collection_chain[1:]
     else:
         root_var = collection_chain[0]
         collection_chain = collection_chain[1:]
         root_type_simple = class_field_types.get(caller_class_fqn, {}).get(root_var)
         if not root_type_simple:
-            return None
-        current_fqn = class_by_simple_name.get(root_type_simple)
-        if not current_fqn:
-            return None
+            return []
+        current_fqns = class_by_simple_name.get(root_type_simple, [])
+        if not current_fqns:
+            return []
 
     for seg in collection_chain:
-        field_map = class_field_types.get(current_fqn, {})
-        next_simple = field_map.get(seg)
-        if not next_simple:
-            return None
-        current_fqn = class_by_simple_name.get(next_simple)
-        if not current_fqn:
-            return None
+        next_fqns: list[str] = []
+        for cfqn in current_fqns:
+            field_map = class_field_types.get(cfqn, {})
+            next_simple = field_map.get(seg)
+            if next_simple:
+                for candidate in class_by_simple_name.get(next_simple, []):
+                    if candidate not in next_fqns:
+                        next_fqns.append(candidate)
+        if not next_fqns:
+            return []
+        current_fqns = next_fqns
 
-    return current_fqn
+    return current_fqns
 
 
 def _find_method_in_class_hierarchy(
@@ -831,6 +848,12 @@ def _process_invocation(
         # match if it equals caller_id — the impl_index gate below will resolve
         # it to the correct impl class instead.
         matches = [mid for mid in matches if mid != caller_id]
+        # Local methods take priority over cross-file matches.  When both a
+        # same-file private method and a global companion method share the same
+        # name (e.g. a local extension function `filterAndMap` defined in the
+        # same class), the local definition wins.  Sort local_method_ids first.
+        if len(matches) > 1 and local_method_ids:
+            matches.sort(key=lambda mid: (0 if mid in local_method_ids else 1))
     else:
         matches = raw_matches
 
@@ -849,12 +872,14 @@ def _process_invocation(
         and caller_class_fqn
         and fqn_index
     ):
-        receiver_fqn = _resolve_chain_receiver_fqn(
+        # _resolve_chain_receiver_fqn now returns a list of candidate FQNs.
+        # Try each candidate in order; emit a CALLS edge for the first hit.
+        receiver_fqns = _resolve_chain_receiver_fqn(
             inv_node, source_bytes, caller_class_fqn,
             class_field_types or {}, class_by_simple_name or {},
             caller_param_types=_caller_param_types,
         )
-        if receiver_fqn is not None:
+        for receiver_fqn in receiver_fqns:
             hit_id = _find_method_in_class_hierarchy(
                 receiver_fqn, name, fqn_index, class_parents or {},
             )
