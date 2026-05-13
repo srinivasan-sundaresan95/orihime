@@ -243,6 +243,44 @@ from .path_utils import compile_path_regex as _path_regex
 # Field type extraction (for property-chain call resolution)
 # ---------------------------------------------------------------------------
 
+_LIST_TYPES = frozenset({"List", "MutableList", "Collection", "Iterable", "Set", "MutableSet"})
+
+
+def _simple_type_from_node(type_node, source_bytes: bytes) -> str | None:
+    """Extract the simple type name from a Kotlin type AST node.
+
+    For collection types (List<Foo>, etc.), returns the element type Foo
+    rather than "List" — this enables resolving `it.method()` inside lambdas
+    like `list.forEach { it.method() }`.
+    For non-collection types, returns the outermost simple name.
+    """
+    if type_node is None:
+        return None
+    if type_node.type == "nullable_type":
+        for child in type_node.children:
+            if child.type in ("user_type", "type_reference"):
+                return _simple_type_from_node(child, source_bytes)
+        return None
+    if type_node.type in ("user_type", "type_reference"):
+        outer_name = None
+        for child in type_node.children:
+            if child.type in ("identifier", "type_identifier", "simple_identifier"):
+                outer_name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                break
+        if outer_name in _LIST_TYPES:
+            for child in type_node.children:
+                if child.type == "type_arguments":
+                    for arg in child.children:
+                        if arg.type == "type_projection":
+                            for sub in arg.children:
+                                if sub.type in ("user_type", "nullable_type", "type_reference"):
+                                    elem = _simple_type_from_node(sub, source_bytes)
+                                    if elem:
+                                        return elem
+        return outer_name
+    return None
+
+
 def _extract_kotlin_field_types(
     class_node,
     source_bytes: bytes,
@@ -263,44 +301,8 @@ def _extract_kotlin_field_types(
     """
     result: dict[str, str] = {}
 
-    _LIST_TYPES = frozenset({"List", "MutableList", "Collection", "Iterable", "Set", "MutableSet"})
-
-    def _simple_type_from_node(type_node) -> str | None:
-        """Extract the simple type name from a type node.
-
-        For collection types (List<Foo>, etc.), returns the element type Foo
-        rather than "List" — this enables resolving `it.method()` inside lambdas
-        like `list.forEach { it.method() }`.
-        For non-collection types, returns the outermost simple name.
-        """
-        if type_node is None:
-            return None
-        # nullable_type wraps another type node
-        if type_node.type == "nullable_type":
-            for child in type_node.children:
-                if child.type in ("user_type", "type_reference"):
-                    return _simple_type_from_node(child)
-            return None
-        if type_node.type in ("user_type", "type_reference"):
-            # Get the outer type name first
-            outer_name = None
-            for child in type_node.children:
-                if child.type in ("identifier", "type_identifier", "simple_identifier"):
-                    outer_name = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
-                    break
-            if outer_name in _LIST_TYPES:
-                # Return the element type from the type_argument instead
-                for child in type_node.children:
-                    if child.type == "type_arguments":
-                        for arg in child.children:
-                            if arg.type == "type_projection":
-                                for sub in arg.children:
-                                    if sub.type in ("user_type", "nullable_type", "type_reference"):
-                                        elem = _simple_type_from_node(sub)
-                                        if elem:
-                                            return elem
-            return outer_name
-        return None
+    def _stype(node) -> str | None:
+        return _simple_type_from_node(node, source_bytes)
 
     # 1. Primary constructor class_parameters
     primary_ctor = None
@@ -327,7 +329,7 @@ def _extract_kotlin_field_types(
                             type_node = c
                     if name_node is not None and type_node is not None:
                         field_name = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                        simple_type = _simple_type_from_node(type_node)
+                        simple_type = _stype(type_node)
                         if field_name and simple_type:
                             result[field_name] = simple_type
 
@@ -360,10 +362,41 @@ def _extract_kotlin_field_types(
                         break
             if name_node is not None and type_node is not None:
                 field_name = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                simple_type = _simple_type_from_node(type_node)
+                simple_type = _stype(type_node)
                 if field_name and simple_type:
                     result[field_name] = simple_type
 
+    return result
+
+
+def _extract_fn_param_types(fn_node, source_bytes: bytes) -> dict[str, str]:
+    """Return {param_name: simple_type_name} for all typed parameters of a function.
+
+    Only parameters with explicit type annotations are included; untyped params
+    (rare in Kotlin but possible for lambdas) are skipped silently.
+    """
+    result: dict[str, str] = {}
+    fn_params = _child_by_type(fn_node, "function_value_parameters")
+    if fn_params is None:
+        return result
+    for fp in fn_params.children:
+        if fp.type != "function_value_parameter":
+            continue
+        param_node = _child_by_type(fp, "parameter")
+        if param_node is None:
+            continue
+        name_node = None
+        type_node = None
+        for c in param_node.children:
+            if c.type in ("simple_identifier", "identifier") and name_node is None:
+                name_node = c
+            elif c.type in ("user_type", "nullable_type", "type_reference") and type_node is None:
+                type_node = c
+        if name_node is not None and type_node is not None:
+            param_name = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+            simple_type = _simple_type_from_node(type_node, source_bytes)
+            if param_name and simple_type:
+                result[param_name] = simple_type
     return result
 
 
@@ -566,6 +599,7 @@ class KotlinExtractor:
         inheritance_edges: list[dict] = []
         impl_map: dict[str, str] = {}
         class_field_types: dict[str, dict[str, str]] = {}
+        method_param_types: dict[str, dict[str, str]] = {}
 
         package = _package_name(root, src)
         imports = _import_map(root, src)
@@ -701,6 +735,11 @@ class KotlinExtractor:
                                 if sid:
                                     fn_param_names.append(_node_text(sid, src).strip())
 
+                # Extract parameter types for resolver param-receiver resolution
+                fn_pt = _extract_fn_param_types(fn_node, src)
+                if fn_pt:
+                    method_param_types[fn_fqn] = fn_pt
+
                 # Find function body for complexity pass
                 fn_body = _child_by_type(fn_node, "function_body")
                 fn_complexity_hint = detect_complexity_hints(
@@ -802,6 +841,11 @@ class KotlinExtractor:
                                 if sid:
                                     tl_param_names.append(_node_text(sid, src).strip())
 
+                # Extract parameter types for resolver param-receiver resolution
+                tl_pt = _extract_fn_param_types(fn_node, src)
+                if tl_pt:
+                    method_param_types[fn_fqn] = tl_pt
+
                 # Find function body for complexity pass
                 tl_fn_body = _child_by_type(fn_node, "function_body")
                 tl_complexity_hint = detect_complexity_hints(
@@ -842,6 +886,7 @@ class KotlinExtractor:
             impl_map=impl_map,
             inheritance_edges=inheritance_edges,
             class_field_types=class_field_types,
+            method_param_types=method_param_types,
         )
 
 

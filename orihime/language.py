@@ -38,6 +38,9 @@ class ExtractResult:
     # class_fqn → {field_name → simple_type_name} — used by resolver for
     # property-chain call resolution (e.g. a.b.c.method())
     class_field_types: dict[str, dict[str, str]] = field(default_factory=dict)
+    # method_fqn → {param_name → simple_type_name} — used by resolver to resolve
+    # calls like param.method() where param is a function argument
+    method_param_types: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 class LanguageExtractor(Protocol):

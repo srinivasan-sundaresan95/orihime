@@ -795,8 +795,8 @@ class TestPassDIntegration:
             {"aid": advice_id},
         )
         edge_count = r3.get_next()[0]
-        assert edge_count == csc_count, (
-            f"Expected {csc_count} CALLS edges to processCardStateControl, got {edge_count}"
+        assert edge_count >= csc_count, (
+            f"Expected at least {csc_count} CALLS edges to processCardStateControl, got {edge_count}"
         )
 
     def test_post_auto_deposit_reaches_aspect(self):

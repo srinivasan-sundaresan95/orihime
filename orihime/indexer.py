@@ -192,6 +192,7 @@ def _parse_file(args: tuple) -> ParseResult:
     result.inheritance_edges = extract_result.inheritance_edges
     result.entity_relations = extract_result.entity_relations
     result.class_field_types = extract_result.class_field_types
+    result.method_param_types = extract_result.method_param_types
 
     return result
 
@@ -789,6 +790,11 @@ def index_repo(
     for pr in parse_results.values():
         all_class_field_types.update(pr.class_field_types)
 
+    # Build merged param-type map: method_fqn → {param_name → simple_type_name}
+    all_method_param_types: dict[str, dict[str, str]] = {}
+    for pr in parse_results.values():
+        all_method_param_types.update(pr.method_param_types)
+
     # Build class_parents: class_fqn → [parent_fqns] from all inheritance edges
     _class_id_to_fqn: dict[str, str] = {cls["id"]: cls["fqn"] for cls in all_classes}
     class_parents: dict[str, list[str]] = {}
@@ -815,10 +821,11 @@ def index_repo(
             fqn_index,
             file_id,
             repo_id,
-            impl_index=impl_index,         # redirect UNRESOLVED calls to impl classes
-            classes=all_classes,           # Kotlin object/companion resolution
-            class_field_types=all_class_field_types,  # property-chain resolution
-            class_parents=class_parents,   # inheritance walk for chain receiver
+            impl_index=impl_index,               # redirect UNRESOLVED calls to impl classes
+            classes=all_classes,                 # Kotlin object/companion resolution
+            class_field_types=all_class_field_types,    # property-chain resolution
+            class_parents=class_parents,         # inheritance walk for chain receiver
+            method_param_types=all_method_param_types,  # param-receiver resolution
         )
 
         for edge in edges:

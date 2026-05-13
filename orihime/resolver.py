@@ -48,6 +48,7 @@ def resolve_calls(
     classes: list[dict] | None = None,   # N1 — Kotlin object/companion resolution
     class_field_types: dict[str, dict[str, str]] | None = None,  # property-chain resolution
     class_parents: dict[str, list[str]] | None = None,   # inheritance walk for chain receiver
+    method_param_types: dict[str, dict[str, str]] | None = None,  # param-receiver resolution
 ) -> list[CallEdge]:
     """Walk all method bodies in *tree* and emit call edges.
 
@@ -193,6 +194,7 @@ def resolve_calls(
                 class_field_types=class_field_types,
                 class_by_simple_name=_class_by_simple_name,
                 class_parents=class_parents,
+                method_param_types=method_param_types,
             )
         elif node.type == "constructor_declaration":
             # Java constructor body: treat as its class's <init> method
@@ -278,6 +280,7 @@ def _process_method_node(
     class_field_types: "dict[str, dict[str, str]] | None" = None,
     class_by_simple_name: "dict[str, str] | None" = None,
     class_parents: "dict[str, list[str]] | None" = None,
+    method_param_types: "dict[str, dict[str, str]] | None" = None,
 ) -> None:
     """Emit CallEdge objects for all call sites inside *method_node*."""
     caller_id = _find_enclosing_method(method_node, source_bytes, methods)
@@ -286,10 +289,12 @@ def _process_method_node(
 
     # Derive the caller's class FQN for property-chain resolution
     caller_class_fqn: str | None = None
-    if class_field_types is not None:
+    caller_fqn: str | None = None
+    if class_field_types is not None or method_param_types is not None:
         for m in methods:
             if m["id"] == caller_id:
                 fqn_str = m.get("fqn", "")
+                caller_fqn = fqn_str
                 if "." in fqn_str:
                     caller_class_fqn = fqn_str.rsplit(".", 1)[0]
                 break
@@ -323,6 +328,8 @@ def _process_method_node(
                 class_by_simple_name=class_by_simple_name,
                 class_parents=class_parents,
                 caller_class_fqn=caller_class_fqn,
+                caller_fqn=caller_fqn,
+                method_param_types=method_param_types,
             )
         elif node.type == "object_creation_expression":
             # Java: `new ClassName(...)` — emit a CALLS edge to ClassName.<init>
@@ -555,6 +562,7 @@ def _resolve_chain_receiver_fqn(
     caller_class_fqn: str,
     class_field_types: dict[str, dict[str, str]],
     class_by_simple_name: dict[str, str],
+    caller_param_types: "dict[str, str] | None" = None,
 ) -> str | None:
     """Return the FQN of the receiver class for a property-chain call, or None.
 
@@ -565,6 +573,9 @@ def _resolve_chain_receiver_fqn(
        Resolves by finding the outer call_expression's navigation chain, which
        gives us the collection field, whose stored element type IS ``it``'s type
        (we store List<Foo> as "Foo" in class_field_types).
+
+    caller_param_types: optional {param_name → simple_type} for the caller method —
+       used as a fallback when the root var is not a class field but a function param.
     """
     nav_node = None
     for child in inv_node.children:
@@ -596,7 +607,10 @@ def _resolve_chain_receiver_fqn(
     else:
         root_var = segments[0]
         segments = segments[1:]
+        # Try class fields first, then function parameters
         root_type_simple = class_field_types.get(caller_class_fqn, {}).get(root_var)
+        if not root_type_simple and caller_param_types:
+            root_type_simple = caller_param_types.get(root_var)
         if not root_type_simple:
             return None
         current_fqn = class_by_simple_name.get(root_type_simple)
@@ -728,6 +742,8 @@ def _process_invocation(
     class_by_simple_name: "dict[str, str] | None" = None,
     class_parents: "dict[str, list[str]] | None" = None,
     caller_class_fqn: "str | None" = None,
+    caller_fqn: "str | None" = None,
+    method_param_types: "dict[str, dict[str, str]] | None" = None,
 ) -> None:
     """Emit one CallEdge for this invocation node."""
     name = _get_invocation_name(inv_node, source_bytes)
@@ -822,16 +838,21 @@ def _process_invocation(
     # determined by walking the declared field types of each intermediate object.
     # Runs when impl_index is active (Kotlin mode), the call has a nav chain, and
     # we haven't already resolved it via the object_index or unambiguous path.
+    # Also fires when only method_param_types is present (param receiver resolution).
+    _caller_param_types: "dict[str, str] | None" = (
+        method_param_types.get(caller_fqn or "") if method_param_types and caller_fqn else None
+    )
     if (
         not matches
         and impl_index is not None
-        and class_field_types
+        and (class_field_types or _caller_param_types)
         and caller_class_fqn
         and fqn_index
     ):
         receiver_fqn = _resolve_chain_receiver_fqn(
             inv_node, source_bytes, caller_class_fqn,
-            class_field_types, class_by_simple_name or {},
+            class_field_types or {}, class_by_simple_name or {},
+            caller_param_types=_caller_param_types,
         )
         if receiver_fqn is not None:
             hit_id = _find_method_in_class_hierarchy(
