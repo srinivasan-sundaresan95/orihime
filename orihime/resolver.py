@@ -436,38 +436,57 @@ def _is_object_style_call(inv_node, source_bytes: bytes) -> bool:
     return False
 
 
-def _has_lowercase_nav_receiver(inv_node, source_bytes: bytes) -> bool:
-    """Return True when the call has a qualified receiver that starts lowercase.
+def _has_lowercase_nav_receiver(
+    inv_node,
+    source_bytes: bytes,
+    di_field_names: "frozenset[str] | None" = None,
+) -> bool:
+    """Return True when the call receiver is a known DI-injected field.
 
-    e.g. ``someService.doWork()`` or ``walletService.getBalance()``.
-    These are DI-injected variable calls and must go through the impl_index gate
-    even when only one method by that name exists in the index.
+    The original heuristic blocked ALL lowercase-receiver calls to prevent
+    resolving DI service calls (``someService.doWork()``) via the unambiguous
+    suffix shortcut.  But it also incorrectly blocked method-parameter receivers
+    (``scheduledMaintenance.isAppliesToTime()``, ``pointBankDisplayConfig.isVisible()``,
+    lambda ``it.method()``) which are statically typed and safe to resolve.
 
-    Two AST shapes:
-    - Kotlin call_expression: first child is navigation_expression whose first
-      identifier child is the receiver.
-    - Java method_invocation: first child is an identifier (the receiver variable)
-      followed by a dot and the method name.
+    Refined rule: a call is a DI field call only when the receiver identifier
+    is in *di_field_names* (the set of class field names for the caller's class,
+    derived from class_field_types).  When di_field_names is not available we
+    fall back to the old heuristic (any lowercase receiver → treat as DI call).
+
+    Two AST shapes handled:
+    - Kotlin call_expression: first child is navigation_expression.
+    - Java method_invocation: identifier DOT identifier prefix.
     """
-    children = list(inv_node.children)
-    # Kotlin: navigation_expression as first child
-    for child in children:
-        if child.type == "navigation_expression":
-            for sub in child.children:
-                if sub.type in ("identifier", "simple_identifier"):
-                    text = _text(sub, source_bytes)
-                    return bool(text) and text[0].islower()
-            break
-    # Java: identifier DOT identifier pattern (receiver is first identifier child)
-    if (
-        len(children) >= 3
-        and children[0].type == "identifier"
-        and children[1].type == "."
-        and children[2].type == "identifier"
-    ):
-        text = _text(children[0], source_bytes)
-        return bool(text) and text[0].islower()
-    return False
+    def _get_receiver_text() -> "str | None":
+        children = list(inv_node.children)
+        # Kotlin: navigation_expression as first child
+        for child in children:
+            if child.type == "navigation_expression":
+                for sub in child.children:
+                    if sub.type in ("identifier", "simple_identifier"):
+                        return _text(sub, source_bytes)
+                break
+        # Java: identifier DOT identifier
+        if (
+            len(children) >= 3
+            and children[0].type == "identifier"
+            and children[1].type == "."
+            and children[2].type == "identifier"
+        ):
+            return _text(children[0], source_bytes)
+        return None
+
+    receiver = _get_receiver_text()
+    if not receiver or not receiver[0].islower():
+        return False
+
+    if di_field_names is not None:
+        # Only treat as DI call when the receiver is a known injected field.
+        return receiver in di_field_names
+
+    # Fallback: no field info available — keep old conservative behaviour.
+    return True
 
 
 def _is_extension_function_callee(method_id: str, fqn_index: dict[str, str]) -> bool:
@@ -770,11 +789,19 @@ def _process_invocation(
     #    (e.g. ``it.isAppliesToTime(t)`` on an abstract-class instance).
     raw_matches = suffix_index.get(name, [])
     if impl_index is not None and not _is_object_style_call(inv_node, source_bytes):
-        # The "unambiguous" exception (len == 1) is safe only when the call has
-        # no lowercase-receiver nav expression.  A lowercase receiver (e.g.
-        # someService.doWork()) is a DI-injected variable call and must go
-        # through the impl_index gate even if only one implementation exists.
-        _allow_unambiguous = not _has_lowercase_nav_receiver(inv_node, source_bytes)
+        # The "unambiguous" exception (len == 1) is safe only when the call is
+        # not a DI-injected field call (e.g. someService.doWork()).  We detect
+        # this by checking whether the receiver name is a known injected field of
+        # the caller's class.  Receivers that are method parameters, loop
+        # variables, or lambda "it" are NOT DI fields and are safe to resolve.
+        _caller_di_fields: "frozenset[str] | None" = (
+            frozenset(class_field_types.get(caller_class_fqn or "", {}).keys())
+            if class_field_types is not None
+            else None
+        )
+        _allow_unambiguous = not _has_lowercase_nav_receiver(
+            inv_node, source_bytes, _caller_di_fields
+        )
         matches = [
             mid for mid in raw_matches
             if mid in local_method_ids

@@ -224,3 +224,98 @@ def test_lowercase_receiver_resolves_via_impl_index():
         f"Expected CALLS for doWork via impl_index. Edges: {edges}"
     )
     assert calls[0].callee_id == impl_m["id"]
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — method parameter receiver resolves via unambiguous suffix
+#           (not a DI field, so _allow_unambiguous=True)
+# ---------------------------------------------------------------------------
+
+PARAM_RECEIVER_SRC = b"""
+package com.example
+
+class Companion {
+    fun of(config: PointBankDisplayConfig, requestTime: ZonedDateTime): State {
+        return if (config.isPointBankStateVisible(requestTime)) State.VISIBLE else State.HIDDEN
+    }
+}
+"""
+
+PARAM_RECEIVER_WITH_FIELD_SRC = b"""
+package com.example
+
+class MyService(
+    private val injectedService: SomeService
+) {
+    fun process(config: PointBankDisplayConfig, requestTime: ZonedDateTime): Boolean {
+        val visible = config.isPointBankStateVisible(requestTime)
+        return visible && injectedService.doWork()
+    }
+}
+"""
+
+
+def test_parameter_receiver_resolves_when_single_definition():
+    """A method call on a parameter (not a DI field) resolves via unambiguous suffix.
+
+    config.isPointBankStateVisible() where config is a parameter — exactly one
+    definition in the index — should resolve to CALLS even with impl_index active.
+    """
+    tree, src = _parse_kotlin(PARAM_RECEIVER_SRC)
+
+    of_m = _method("of", "com.example.Companion.of", line_start=4, file_id="file1")
+    visible_m = _method("isPointBankStateVisible",
+                        "com.example.PointBankDisplayConfig.isPointBankStateVisible",
+                        line_start=2, file_id="file_other")
+    fqn_index = build_fqn_index([of_m, visible_m])
+
+    # class_field_types for Companion.of has no fields (no val/var params)
+    class_field_types = {"com.example.Companion": {}}
+
+    edges = resolve_calls(
+        tree, src, [of_m], fqn_index, "file1", "repo1",
+        impl_index={"com.example.ISomething": "com.example.SomethingImpl"},
+        class_field_types=class_field_types,
+    )
+
+    calls = [e for e in edges if e.edge_type == "CALLS" and e.callee_name == "isPointBankStateVisible"]
+    assert len(calls) == 1, (
+        f"Expected CALLS for param receiver (single definition). Edges: {edges}"
+    )
+    assert calls[0].callee_id == visible_m["id"]
+
+
+def test_di_field_still_blocked_when_class_field_types_provided():
+    """A DI-injected field call stays UNRESOLVED even when class_field_types is present.
+
+    injectedService.doWork() where injectedService IS a class field — must remain
+    UNRESOLVED (or be resolved via impl_index, not via the suffix shortcut).
+    """
+    tree, src = _parse_kotlin(PARAM_RECEIVER_WITH_FIELD_SRC)
+
+    process_m = _method("process", "com.example.MyService.process", line_start=6, file_id="file1")
+    visible_m = _method("isPointBankStateVisible",
+                        "com.example.PointBankDisplayConfig.isPointBankStateVisible",
+                        line_start=2, file_id="file_other")
+    do_work_m = _method("doWork", "com.example.SomeServiceImpl.doWork",
+                        line_start=3, file_id="file_impl")
+    fqn_index = build_fqn_index([process_m, visible_m, do_work_m])
+
+    # MyService has "injectedService" as a val field
+    class_field_types = {"com.example.MyService": {"injectedService": "SomeService"}}
+
+    edges = resolve_calls(
+        tree, src, [process_m], fqn_index, "file1", "repo1",
+        impl_index={},  # empty — no DI mapping
+        class_field_types=class_field_types,
+    )
+
+    # isPointBankStateVisible on a parameter should resolve
+    vis_calls = [e for e in edges if e.edge_type == "CALLS" and e.callee_name == "isPointBankStateVisible"]
+    assert len(vis_calls) == 1, f"Expected CALLS for param receiver: {edges}"
+
+    # doWork on a DI field with empty impl_index should be UNRESOLVED
+    unresolved = [e for e in edges if e.edge_type == "UNRESOLVED_CALL" and e.callee_name == "doWork"]
+    assert len(unresolved) >= 1, (
+        f"Expected UNRESOLVED_CALL for DI field with empty impl_index: {edges}"
+    )
