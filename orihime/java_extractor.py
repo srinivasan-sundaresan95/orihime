@@ -949,6 +949,10 @@ class JavaExtractor:
         constant_index: "dict[str, str] | None" = None,
         class_annotations: "list[str] | None" = None,
     ) -> None:
+        # Track how many times each method name appears within this class body so that
+        # overloaded methods get unique FQNs: first occurrence keeps plain FQN, subsequent
+        # ones become fqn#2, fqn#3, etc.
+        name_count: dict[str, int] = {}
         for child in body_node.children:
             if child.type == "method_declaration":
                 self._process_method(
@@ -962,6 +966,7 @@ class JavaExtractor:
                     result,
                     constant_index=constant_index,
                     class_annotations=class_annotations,
+                    name_count=name_count,
                 )
 
     def _process_method(
@@ -976,6 +981,7 @@ class JavaExtractor:
         result: ExtractResult,
         constant_index: "dict[str, str] | None" = None,
         class_annotations: "list[str] | None" = None,
+        name_count: "dict[str, int] | None" = None,
     ) -> None:
         name_node = method_node.child_by_field_name("name")
         if name_node is None:
@@ -984,7 +990,13 @@ class JavaExtractor:
             return
 
         method_name = _text(name_node, source_bytes)
-        method_fqn = f"{class_fqn}.{method_name}"
+        base_fqn = f"{class_fqn}.{method_name}"
+        if name_count is not None:
+            n = name_count.get(method_name, 0) + 1
+            name_count[method_name] = n
+            method_fqn = base_fqn if n == 1 else f"{base_fqn}#{n}"
+        else:
+            method_fqn = base_fqn
         line_start = method_node.start_point[0] + 1  # tree-sitter is 0-based
 
         modifiers_node = _find_first_child_of_type(method_node, "modifiers")

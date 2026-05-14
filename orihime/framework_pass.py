@@ -76,16 +76,18 @@ def run_framework_pass(conn, writer, repo_id: str) -> dict[str, int]:
     b = _pass_b_filters(conn, writer, repo_id, written)
     c = _pass_c_event_listeners(conn, writer, repo_id, written)
     d = _pass_d_aop_aspects(conn, writer, repo_id, written)
+    e = _pass_e_constraint_validators(conn, writer, repo_id)
 
     log.info(
-        "framework_pass repo=%s  assert_true=%d  filter=%d  event_listener=%d  aop_aspect=%d",
-        repo_id, a, b, c, d,
+        "framework_pass repo=%s  assert_true=%d  filter=%d  event_listener=%d  aop_aspect=%d  constraint_validators=%d",
+        repo_id, a, b, c, d, e,
     )
     return {
         "assert_true_edges": a,
         "filter_edges": b,
         "event_listener_edges": c,
         "aop_aspect_edges": d,
+        "constraint_validator_entry_points": e,
     }
 
 
@@ -585,3 +587,43 @@ def _pass_d_aop_aspects(conn, writer, repo_id: str, written: set[tuple[str, str]
                 edges.append((target_mid, advice_mid, advice_name))
 
     return _flush_edges(writer, edges, written)
+
+
+# ---------------------------------------------------------------------------
+# Pass E — ConstraintValidator.isValid() entry points
+# ---------------------------------------------------------------------------
+
+def _pass_e_constraint_validators(conn, writer, repo_id: str) -> int:
+    """Mark isValid() methods on ConstraintValidator implementors as is_entry_point=true.
+
+    Bean Validation calls isValid() on every ConstraintValidator instance whenever
+    the constraint annotation is encountered, so isValid() is a framework entry point.
+    """
+    r = conn.execute(
+        "MATCH (c:Class)-[:IMPLEMENTS]->(p:Class) "
+        "WHERE p.fqn CONTAINS 'ConstraintValidator' AND c.repo_id = $rid "
+        "RETURN c.id",
+        {"rid": repo_id},
+    )
+    validator_class_ids: list[str] = []
+    while r.has_next():
+        validator_class_ids.append(r.get_next()[0])
+
+    if not validator_class_ids:
+        return 0
+
+    updated = 0
+    for class_id in validator_class_ids:
+        r2 = conn.execute(
+            "MATCH (m:Method) WHERE m.class_id = $cid AND m.name = 'isValid' RETURN m.id",
+            {"cid": class_id},
+        )
+        while r2.has_next():
+            mid = r2.get_next()[0]
+            writer.execute(
+                "MATCH (m:Method) WHERE m.id = $mid SET m.is_entry_point = true",
+                {"mid": mid},
+            )
+            updated += 1
+
+    return updated

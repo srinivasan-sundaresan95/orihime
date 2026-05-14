@@ -31,7 +31,7 @@ _CACHE_RECEIVER_TOKENS: frozenset[str] = frozenset({"cache", "Cache", "cacheMana
 # Parallel wrapper detection
 # ---------------------------------------------------------------------------
 # Priority: coroutine > completable_future > reactor > spring_async
-_KOTLIN_PARALLEL_NAMES: frozenset[str] = frozenset({"async", "coroutineScope", "withContext"})
+_KOTLIN_PARALLEL_NAMES: frozenset[str] = frozenset({"async", "coroutineScope", "withContext", "runBlocking"})
 _JAVA_PARALLEL_NAMES: frozenset[str] = frozenset({
     "supplyAsync", "runAsync", "allOf", "thenCompose", "thenCombine", "thenApply",
 })

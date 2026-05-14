@@ -373,6 +373,15 @@ def _process_method_node(
                 ctor_index or {},
                 edges,
             )
+        elif node.type == "callable_reference":
+            # Kotlin: `::methodName` or `ClassName::methodName` — emit CALLS via suffix lookup
+            _process_callable_reference(
+                node, source_bytes, caller_id, suffix_index, edges,
+                fqn_index=fqn_index,
+                caller_class_fqn=caller_class_fqn,
+                class_by_simple_name=class_by_simple_name or {},
+                extends_map=extends_map,
+            )
 
 
 def _get_invocation_name(inv_node, source_bytes: bytes) -> str | None:
@@ -624,6 +633,7 @@ def _resolve_chain_receiver_fqn(
     class_by_simple_name: "dict[str, list[str]]",
     caller_param_types: "dict[str, str] | None" = None,
     caller_imports: "dict[str, str] | None" = None,  # RC-A: simple_class → fqn_prefix
+    extends_map: "dict[str, list[str]] | None" = None,  # RC-Super: super.method() resolution
 ) -> "list[str]":
     """Return all candidate receiver class FQNs for a property-chain call.
 
@@ -669,7 +679,11 @@ def _resolve_chain_receiver_fqn(
 
     segments = chain[:-1]  # drop method name
     if segments and segments[0] in ("this", "super"):
-        start_fqns = [caller_class_fqn]
+        if segments[0] == "super" and extends_map:
+            # super.method() must resolve on the superclass, not on the caller itself
+            start_fqns = extends_map.get(caller_class_fqn, [caller_class_fqn])
+        else:
+            start_fqns = [caller_class_fqn]
         segments = segments[1:]
     else:
         root_var = segments[0]
@@ -833,6 +847,68 @@ def _find_method_in_class_hierarchy(
                         next_queue.append(parent_fqn)
         queue = next_queue
     return None
+
+
+def _process_callable_reference(
+    node,
+    source_bytes: bytes,
+    caller_id: str,
+    suffix_index: dict[str, list[str]],
+    edges: list[CallEdge],
+    fqn_index: "dict[str, str] | None" = None,
+    caller_class_fqn: "str | None" = None,
+    class_by_simple_name: "dict[str, list[str]] | None" = None,
+    extends_map: "dict[str, list[str]] | None" = None,
+) -> None:
+    """Emit CALLS for Kotlin callable_reference nodes (::method or Class::method)."""
+    # Structure: callable_reference → [receiver?, '::', identifier]
+    method_name: str | None = None
+    receiver_name: str | None = None
+
+    children = node.children
+    for i, c in enumerate(children):
+        if c.type == "::":
+            # identifier immediately after '::'
+            if i + 1 < len(children) and children[i + 1].type in ("identifier", "simple_identifier"):
+                method_name = _text(children[i + 1], source_bytes)
+            # receiver is the token immediately before '::'
+            if i > 0 and children[i - 1].type in ("identifier", "simple_identifier", "type_identifier"):
+                receiver_name = _text(children[i - 1], source_bytes)
+            break
+
+    if not method_name:
+        return
+
+    # Try FQN-exact resolution first: receiver_name is a class simple name
+    if receiver_name and fqn_index and class_by_simple_name:
+        receiver_fqns = class_by_simple_name.get(receiver_name, [])
+        for rfqn in receiver_fqns:
+            hit_id = _find_method_in_class_hierarchy(
+                rfqn, method_name, fqn_index, {},
+                extends_map=extends_map,
+            )
+            if hit_id is not None:
+                edges.append(CallEdge(
+                    caller_id=caller_id,
+                    callee_id=hit_id,
+                    edge_type="CALLS",
+                    callee_name=method_name,
+                    caller_arg_pos=-1,
+                    callee_param_pos=-1,
+                ))
+                return
+
+    # Fallback: suffix index lookup (same as unqualified call resolution)
+    matches = suffix_index.get(method_name, [])
+    if matches:
+        edges.append(CallEdge(
+            caller_id=caller_id,
+            callee_id=matches[0],
+            edge_type="CALLS",
+            callee_name=method_name,
+            caller_arg_pos=-1,
+            callee_param_pos=-1,
+        ))
 
 
 def _process_invocation(
@@ -1023,6 +1099,7 @@ def _process_invocation(
             class_field_types or {}, class_by_simple_name or {},
             caller_param_types=_caller_param_types,
             caller_imports=caller_imports,
+            extends_map=extends_map,
         )
         for receiver_fqn in receiver_fqns:
             hit_id = _find_method_in_class_hierarchy(

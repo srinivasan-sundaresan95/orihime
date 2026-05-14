@@ -708,6 +708,7 @@ class KotlinExtractor:
             if class_body is None:
                 continue
 
+            fn_name_count: dict[str, int] = {}
             for fn_node in _iter_function_nodes(class_body):
                 fn_modifiers = _child_by_type(fn_node, "modifiers")
                 fn_annotations = _collect_annotations(fn_modifiers, src)
@@ -716,7 +717,9 @@ class KotlinExtractor:
                 if fn_name_node is None:
                     continue
                 fn_name = _node_text(fn_name_node, src).strip()
-                fn_fqn = f"{fqn}.{fn_name}"
+                _fn_n = fn_name_count.get(fn_name, 0) + 1
+                fn_name_count[fn_name] = _fn_n
+                fn_fqn = f"{fqn}.{fn_name}" if _fn_n == 1 else f"{fqn}.{fn_name}#{_fn_n}"
 
                 is_suspend = _is_suspend(fn_modifiers, src)
                 line_start = fn_node.start_point[0] + 1  # 1-based
@@ -817,6 +820,7 @@ class KotlinExtractor:
                 "enclosing_class_name": None,
                 "annotations": [],
             })
+            tl_name_count: dict[str, int] = {}
             for fn_node in fn_list:
                 fn_modifiers = _child_by_type(fn_node, "modifiers")
                 fn_annotations = _collect_annotations(fn_modifiers, src)
@@ -825,7 +829,9 @@ class KotlinExtractor:
                 if fn_name_node is None:
                     continue
                 fn_name = _node_text(fn_name_node, src).strip()
-                fn_fqn = f"{kt_fqn}.{fn_name}"
+                _tl_n = tl_name_count.get(fn_name, 0) + 1
+                tl_name_count[fn_name] = _tl_n
+                fn_fqn = f"{kt_fqn}.{fn_name}" if _tl_n == 1 else f"{kt_fqn}.{fn_name}#{_tl_n}"
 
                 is_suspend = _is_suspend(fn_modifiers, src)
                 line_start = fn_node.start_point[0] + 1  # 1-based

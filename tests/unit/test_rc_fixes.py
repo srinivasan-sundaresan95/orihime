@@ -506,3 +506,116 @@ class TestAssertTrueFrameworkPassNoCrossEdges:
             "RETURN count(*)"
         )
         assert res2.get_next()[0] == 0, "isBValid must NOT call isAValid"
+
+
+# ---------------------------------------------------------------------------
+# RC-Super: super.method() resolves to superclass method, not caller's own
+# ---------------------------------------------------------------------------
+
+class TestRcSuperMethodResolution:
+    """super.method() must resolve to the superclass method, not UNRESOLVED."""
+
+    def test_super_call_resolves_to_parent(self):
+        """Child.doWork() calls super.process() — must resolve to Parent.process."""
+        src = textwrap.dedent("""\
+            package com.example;
+            class Child extends Parent {
+                private Helper helper;
+                void doWork() {
+                    super.process();
+                }
+            }
+        """).encode()
+        tree, source_bytes = _parse_java(src)
+
+        caller_m  = _method("doWork", "com.example.Child.doWork", line_start=4)
+        target_id = str(uuid.uuid4())
+        wrong_id  = str(uuid.uuid4())
+        methods   = [caller_m]
+        fqn_index = {
+            "com.example.Child.doWork": caller_m["id"],
+            "com.example.Parent.process": target_id,
+            "com.example.Child.process": wrong_id,  # override would shadow without super
+        }
+        extends_map = {"com.example.Child": ["com.example.Parent"]}
+
+        edges = resolve_calls(
+            tree, source_bytes, methods, fqn_index, "f1", "repo1",
+            extends_map=extends_map,
+        )
+        calls = [e for e in edges if e.edge_type == "CALLS"]
+        callee_ids = {e.callee_id for e in calls}
+
+        assert target_id in callee_ids, "super.process() must resolve to Parent.process"
+
+
+# ---------------------------------------------------------------------------
+# Overload deduplication: overloaded methods get unique FQNs
+# ---------------------------------------------------------------------------
+
+class TestOverloadedMethodIndexing:
+    """Methods with the same name but different signatures must all be indexed."""
+
+    def test_overloaded_java_methods_all_indexed(self):
+        """Interface with two overloads of findByUser must produce two Method nodes."""
+        src = textwrap.dedent("""\
+            package com.example;
+            import org.springframework.data.jpa.repository.Query;
+            import org.springframework.data.domain.Page;
+            import org.springframework.data.domain.Pageable;
+            interface TxRepository {
+                @Query("SELECT t FROM Tx t WHERE t.userId = :userId")
+                Page<Object> getTxHistory(long userId, Pageable pageable);
+
+                @Query("SELECT t FROM Tx t WHERE t.userId = :userId AND t.status = :status")
+                Page<Object> getTxHistory(long userId, String status, Pageable pageable);
+            }
+        """).encode()
+        parser = get_parser("java")
+        tree = parser.parse(src)
+        from orihime.java_extractor import JavaExtractor
+        extractor = JavaExtractor()
+        result = extractor.extract(tree, src, "f1", "repo1")
+
+        method_fqns = [m["fqn"] for m in result.methods if "getTxHistory" in m["fqn"]]
+        assert len(method_fqns) == 2, \
+            f"Both overloads must be indexed, got {method_fqns}"
+        assert len(set(method_fqns)) == 2, \
+            f"Overload FQNs must be distinct, got {method_fqns}"
+
+
+# ---------------------------------------------------------------------------
+# Kotlin callable_reference: ::method emits CALLS edges
+# ---------------------------------------------------------------------------
+
+class TestKotlinCallableReference:
+    """Kotlin ::method references must produce CALLS edges."""
+
+    def test_callable_ref_resolves_to_method(self):
+        """items.map(::processItem) must emit a CALLS edge to processItem."""
+        src = textwrap.dedent("""\
+            package com.example
+            class Service {
+                fun process(): List<String> {
+                    val items = listOf("a", "b")
+                    return items.map(::transform)
+                }
+                fun transform(s: String): String = s.uppercase()
+            }
+        """).encode()
+        parser = get_parser("kotlin")
+        tree = parser.parse(src)
+
+        caller_m = _method("process", "com.example.Service.process", line_start=3)
+        target_id = str(uuid.uuid4())
+        methods = [caller_m]
+        fqn_index = {
+            "com.example.Service.process": caller_m["id"],
+            "com.example.Service.transform": target_id,
+        }
+
+        edges = resolve_calls(tree, src, methods, fqn_index, "f1", "repo1")
+        calls = [e for e in edges if e.edge_type == "CALLS"]
+        callee_ids = {e.callee_id for e in calls}
+
+        assert target_id in callee_ids, "::transform must produce a CALLS edge to Service.transform"
