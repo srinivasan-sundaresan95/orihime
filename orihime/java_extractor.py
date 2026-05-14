@@ -23,7 +23,8 @@ _ENDPOINT_ANNOTATIONS: dict[str, str] = {
 
 # Annotations that mark a method as a messaging/scheduling entry point
 _ENTRY_POINT_ANNOTATIONS: frozenset[str] = frozenset(
-    {"KafkaListener", "Scheduled", "JmsListener", "RabbitListener"}
+    {"KafkaListener", "Scheduled", "JmsListener", "RabbitListener",
+     "PostConstruct", "PreDestroy", "Bean"}
 )
 
 # RestTemplate / WebClient / RestClient method names mapped to HTTP methods
@@ -469,8 +470,13 @@ _LOMBOK_GETTER_RE = re.compile(r'^(get|is)[A-Z]')
 _LOMBOK_SETTER_RE = re.compile(r'^set[A-Z]')
 
 
-def _is_lombok_generated(method_name: str, class_annotations: list[str]) -> bool:
-    """Return True if method_name is likely Lombok-generated given the class annotations."""
+def _is_lombok_generated(method_name: str, class_annotations: list[str], has_body: bool = True) -> bool:
+    """Return True if method_name is likely Lombok-generated given the class annotations.
+
+    A method with an explicit body is always user-written, even on a Lombok class.
+    """
+    if has_body:
+        return False
     if not _LOMBOK_CLASS_ANNOTATIONS.intersection(class_annotations):
         return False
     if method_name in _LOMBOK_GENERATED_NAMES:
@@ -536,15 +542,16 @@ def _extract_inheritance(
             if n.type == "type_identifier"
         ]
 
-    if node_type == "class_declaration":
-        # superclass → EXTENDS
-        superclass_node = node.child_by_field_name("superclass")
-        if superclass_node is not None:
-            for simple in _collect_type_identifiers(superclass_node):
-                parent_fqn = _resolve(simple)
-                if parent_fqn != class_fqn:
-                    edges.append({"child_id": class_id, "parent_fqn": parent_fqn, "edge_type": "EXTENDS"})
-                break  # only one superclass
+    if node_type in ("class_declaration", "enum_declaration"):
+        if node_type == "class_declaration":
+            # superclass → EXTENDS (enums cannot extend classes)
+            superclass_node = node.child_by_field_name("superclass")
+            if superclass_node is not None:
+                for simple in _collect_type_identifiers(superclass_node):
+                    parent_fqn = _resolve(simple)
+                    if parent_fqn != class_fqn:
+                        edges.append({"child_id": class_id, "parent_fqn": parent_fqn, "edge_type": "EXTENDS"})
+                    break  # only one superclass
 
         # interfaces → IMPLEMENTS
         interfaces_node = node.child_by_field_name("interfaces")
@@ -808,6 +815,11 @@ class JavaExtractor:
                     node, source_bytes, file_id, repo_id, package, result,
                     is_interface=True, constant_index=constant_index, import_map=import_map
                 )
+            elif node.type == "enum_declaration":
+                self._process_class(
+                    node, source_bytes, file_id, repo_id, package, result,
+                    is_interface=False, constant_index=constant_index, import_map=import_map
+                )
 
     def _process_class(
         self,
@@ -904,6 +916,13 @@ class JavaExtractor:
         if body_node is None:
             body_node = _find_first_child_of_type(class_node, "class_body")
         if body_node:
+            # For enum_body, methods live inside enum_body_declarations
+            if body_node.type == "enum_body":
+                body_node = next(
+                    (c for c in body_node.children if c.type == "enum_body_declarations"),
+                    None,
+                )
+        if body_node:
             self._process_methods(
                 body_node,
                 source_bytes,
@@ -971,8 +990,6 @@ class JavaExtractor:
         modifiers_node = _find_first_child_of_type(method_node, "modifiers")
         annotations = _collect_annotations(modifiers_node, source_bytes)
 
-        generated = _is_lombok_generated(method_name, class_annotations or [])
-
         # Determine if this method is an entry point:
         # - HTTP handler methods (have an endpoint annotation)
         # - Kafka consumers, scheduled tasks, JMS/RabbitMQ listeners
@@ -996,6 +1013,8 @@ class JavaExtractor:
         body_node = method_node.child_by_field_name("body")
         if body_node is None:
             body_node = _find_first_child_of_type(method_node, "block")
+
+        generated = _is_lombok_generated(method_name, class_annotations or [], has_body=body_node is not None)
 
         complexity_hint = detect_complexity_hints(
             body_node, source_bytes, method_name, param_names, "java"

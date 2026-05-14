@@ -352,3 +352,157 @@ class TestRcKExtendsMapResolution:
 
         assert target_id in callee_ids, \
             "BaseHelper.sharedMethod must be resolved via extends_map walk"
+
+
+# ---------------------------------------------------------------------------
+# RC-L2: explicitly-written methods on Lombok-annotated classes must NOT be
+#         flagged as generated=True
+# ---------------------------------------------------------------------------
+
+class TestRcL2LombokGeneratedFalseForExplicit:
+    """RC-L2: _is_lombok_generated must return False when the method has a body."""
+
+    def test_explicit_getter_not_generated(self):
+        """A getX() method with an explicit body on a @Data class must be generated=False."""
+        src = textwrap.dedent("""\
+            package com.example;
+            import lombok.Data;
+            @Data
+            class TxQueryCriteria {
+                private String pattern;
+                public String getPattern() {
+                    return pattern == null ? "" : pattern.trim();
+                }
+            }
+        """).encode()
+        parser = get_parser("java")
+        tree = parser.parse(src)
+        from orihime.java_extractor import JavaExtractor
+        from orihime.language import ExtractResult
+        extractor = JavaExtractor()
+        result = extractor.extract(tree, src, "f1", "repo1")
+        methods = {m["name"]: m for m in result.methods}
+        assert "getPattern" in methods, "getPattern must be indexed"
+        assert not methods["getPattern"]["generated"], \
+            "explicit getPattern on @Data class must NOT be generated=True"
+
+    def test_pure_lombok_getter_is_generated(self):
+        """A @Data class with no explicit getX() — the graph records no generated method
+        (Lombok-generated bodies have no source node, so _process_methods never sees them).
+        This test verifies _is_lombok_generated returns False when has_body=True and
+        True when has_body=False (interface abstract method pattern)."""
+        from orihime.java_extractor import _is_lombok_generated
+        assert not _is_lombok_generated("getEasyId", ["Data"], has_body=True), \
+            "method with body must not be generated even on @Data class"
+        assert _is_lombok_generated("getEasyId", ["Data"], has_body=False), \
+            "abstract getter on @Data class (no body) must be generated=True"
+
+
+# ---------------------------------------------------------------------------
+# Enum indexing: Java enum classes and their explicit methods must be indexed
+# ---------------------------------------------------------------------------
+
+class TestEnumIndexing:
+    """Java enum declarations must produce Class and Method nodes."""
+
+    def test_enum_class_and_methods_indexed(self):
+        """An enum with explicit methods must produce a Class node and Method nodes."""
+        src = textwrap.dedent("""\
+            package com.example;
+            public enum OrderStatus {
+                PENDING, ACTIVE, CANCELLED;
+
+                public boolean isFinal() {
+                    return this == CANCELLED;
+                }
+
+                public String label() {
+                    return name().toLowerCase();
+                }
+            }
+        """).encode()
+        parser = get_parser("java")
+        tree = parser.parse(src)
+        from orihime.java_extractor import JavaExtractor
+        extractor = JavaExtractor()
+        result = extractor.extract(tree, src, "f1", "repo1")
+
+        class_fqns = {c["fqn"] for c in result.classes}
+        assert "com.example.OrderStatus" in class_fqns, "enum class must be indexed"
+
+        method_names = {m["name"] for m in result.methods}
+        assert "isFinal" in method_names, "enum method isFinal must be indexed"
+        assert "label" in method_names, "enum method label must be indexed"
+
+    def test_enum_implements_recorded(self):
+        """An enum that implements an interface must produce an IMPLEMENTS inheritance edge."""
+        src = textwrap.dedent("""\
+            package com.example;
+            public enum Status implements Validatable {
+                ACTIVE, INACTIVE;
+                public boolean isValid() { return this == ACTIVE; }
+            }
+        """).encode()
+        parser = get_parser("java")
+        tree = parser.parse(src)
+        from orihime.java_extractor import JavaExtractor
+        extractor = JavaExtractor()
+        result = extractor.extract(tree, src, "f1", "repo1")
+
+        impls = [e for e in result.inheritance_edges if e["edge_type"] == "IMPLEMENTS"]
+        parent_fqns = {e["parent_fqn"] for e in impls}
+        assert any("Validatable" in fqn for fqn in parent_fqns), \
+            "enum IMPLEMENTS edge must be recorded for Validatable"
+
+
+# ---------------------------------------------------------------------------
+# RC-Assert: @AssertTrue framework_pass must not emit cross-method edges
+# ---------------------------------------------------------------------------
+
+class TestAssertTrueFrameworkPassNoCrossEdges:
+    """_pass_a_assert_true must only emit <init>→@AssertTrue, not sibling @AssertTrue edges."""
+
+    def test_no_cross_assert_true_edges(self, tmp_path):
+        """Two @AssertTrue methods on same class must not get edges to each other."""
+        from orihime.indexer import index_repo
+        import kuzu
+
+        src = textwrap.dedent("""\
+            package com.example;
+            import javax.validation.constraints.AssertTrue;
+            public class Config {
+                private String a;
+                private String b;
+
+                @AssertTrue
+                public boolean isAValid() { return a != null; }
+
+                @AssertTrue
+                public boolean isBValid() { return b != null; }
+            }
+        """)
+        repo_dir = tmp_path / "repo"
+        java_dir = repo_dir / "src" / "main" / "java" / "com" / "example"
+        java_dir.mkdir(parents=True)
+        (java_dir / "Config.java").write_text(src)
+
+        db_path = str(tmp_path / "test.db")
+        index_repo(str(repo_dir), "assert-test", db_path)
+
+        db = kuzu.Database(db_path)
+        conn = kuzu.Connection(db)
+
+        # Check no edge from isAValid → isBValid or vice versa
+        res = conn.execute(
+            "MATCH (a:Method)-[:CALLS]->(b:Method) "
+            "WHERE a.fqn CONTAINS 'isAValid' AND b.fqn CONTAINS 'isBValid' "
+            "RETURN count(*)"
+        )
+        assert res.get_next()[0] == 0, "isAValid must NOT call isBValid"
+
+        res2 = conn.execute(
+            "MATCH (a:Method)-[:CALLS]->(b:Method) "
+            "WHERE a.fqn CONTAINS 'isBValid' AND b.fqn CONTAINS 'isAValid' "
+            "RETURN count(*)"
+        )
+        assert res2.get_next()[0] == 0, "isBValid must NOT call isAValid"

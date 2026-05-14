@@ -37,7 +37,8 @@ _REST_CLIENT_ROOTS = {"restClient", "webClient", "restTemplate", "RestClient", "
 
 # Annotations that mark a Kotlin method as a messaging/scheduling entry point
 _ENTRY_POINT_ANNOTATIONS: frozenset[str] = frozenset(
-    {"KafkaListener", "Scheduled", "JmsListener", "RabbitListener"}
+    {"KafkaListener", "Scheduled", "JmsListener", "RabbitListener",
+     "PostConstruct", "PreDestroy", "Bean"}
 )
 
 _KOTLIN_DATA_GENERATED_NAMES: frozenset[str] = frozenset({

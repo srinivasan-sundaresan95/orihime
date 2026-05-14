@@ -248,14 +248,9 @@ def _pass_a_assert_true(conn, writer, repo_id: str, written: set[tuple[str, str]
             while r4.has_next():
                 caller_ids.append(r4.get_next()[0])
 
-        # Also include the class's own methods (self-validation)
-        r5 = conn.execute(
-            "MATCH (m:Method) WHERE m.class_id = $cid AND m.repo_id = $rid RETURN m.id",
-            {"cid": class_id, "rid": repo_id},
-        )
-        own_ids = []
-        while r5.has_next():
-            own_ids.append(r5.get_next()[0])
+        # Include only <init> as own-method source (construction triggers validation).
+        # Emitting all class methods would create false cross-@AssertTrue edges.
+        own_ids = [init_ids[class_id]] if class_id in init_ids else []
 
         for caller_id in caller_ids + own_ids:
             for assert_mid, assert_name in am_list:
