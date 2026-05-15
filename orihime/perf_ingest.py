@@ -1,8 +1,10 @@
 """G8 — Perf Result Ingestion.
 
-Parsers for three load-test result formats:
+Parsers for four load-test result formats:
   - Gatling simulation.log
   - JMeter JTL XML
+  - k6 summary JSON  (--summary-export result.json)
+  - k6 CSV           (--out csv=result.csv)
   - Simple JSON ({fqn, p50_ms, p99_ms, rps}[])
 
 Each parser returns a list of dicts with keys:
@@ -11,6 +13,7 @@ Each parser returns a list of dicts with keys:
 """
 from __future__ import annotations
 
+import csv
 import json
 import math
 import xml.etree.ElementTree as ET
@@ -212,15 +215,178 @@ def parse_json(file_path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# k6 summary JSON parser  (--summary-export result.json)
+# ---------------------------------------------------------------------------
+
+def parse_k6_summary(file_path: str) -> list[dict]:
+    """Parse a k6 summary export JSON file (``k6 run --summary-export result.json``).
+
+    k6 groups HTTP metrics by URL tag under the top-level ``metrics`` key.
+    Each group named ``http_req_duration{...}`` contains ``p(50)`` and ``p(99)``
+    sub-values (in ms) and ``http_reqs{...}`` provides the request rate.
+
+    The URL is extracted from the ``url`` tag in the metric group name.
+    If no URL tag is present the plain metric name is used as the endpoint key
+    so callers can still match against it.
+
+    source = "k6_summary"
+    sample_time = top-level ``state.testRunDurationMs`` converted to ISO, or now().
+    """
+    with open(file_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    if not isinstance(data, dict) or "metrics" not in data:
+        raise ValueError("Not a k6 summary export — expected top-level 'metrics' key.")
+
+    metrics: dict = data["metrics"]
+
+    # Derive sample_time from state block if present
+    state = data.get("state", {})
+    test_run_ms = state.get("testRunDurationMs")
+    if test_run_ms:
+        sample_time = _iso_from_ms(int(test_run_ms))
+    else:
+        sample_time = datetime.now(tz=timezone.utc).isoformat()
+
+    # Build a map: url_tag -> {p50, p99, count, rate}
+    # Metric names look like:
+    #   "http_req_duration"               (untagged — single scenario)
+    #   "http_req_duration{url:GET /foo}" (tagged — per-URL breakdown)
+    # Rate comes from matching "http_reqs" or "http_reqs{url:...}" entry.
+
+    def _extract_tag(metric_name: str, tag: str) -> str | None:
+        """Return the value of *tag* from a k6 metric name like 'name{tag:val,...}'."""
+        brace = metric_name.find("{")
+        if brace == -1:
+            return None
+        inner = metric_name[brace + 1: -1]  # strip { }
+        for part in inner.split(","):
+            k, _, v = part.partition(":")
+            if k.strip() == tag:
+                return v.strip()
+        return None
+
+    # Collect duration entries
+    duration_entries: dict[str, dict] = {}  # group_key -> {p50, p99}
+    rate_entries: dict[str, float] = {}     # group_key -> rps
+
+    for metric_name, metric_body in metrics.items():
+        base = metric_name.split("{")[0]
+        if base == "http_req_duration":
+            url = _extract_tag(metric_name, "url") or metric_name
+            values = metric_body.get("values", {})
+            p50 = float(values.get("p(50)", 0.0))
+            p99 = float(values.get("p(99)", 0.0))
+            duration_entries[url] = {"p50_ms": p50, "p99_ms": p99}
+        elif base == "http_reqs":
+            url = _extract_tag(metric_name, "url") or metric_name
+            values = metric_body.get("values", {})
+            # k6 exposes rate as requests/second in the summary
+            rate_entries[url] = float(values.get("rate", 0.0))
+
+    if not duration_entries:
+        raise ValueError(
+            "No 'http_req_duration' metrics found in k6 summary. "
+            "Run k6 with --summary-export and ensure HTTP checks are used."
+        )
+
+    samples: list[dict] = []
+    for url, durations in duration_entries.items():
+        # For untagged single-scenario runs the key IS the metric name string;
+        # use it as-is — callers can map it to an endpoint FQN.
+        rps = rate_entries.get(url, 0.0)
+        samples.append({
+            "endpoint_fqn": url,
+            "p50_ms": durations["p50_ms"],
+            "p99_ms": durations["p99_ms"],
+            "rps": rps,
+            "sample_time": sample_time,
+            "source": "k6_summary",
+        })
+    return samples
+
+
+# ---------------------------------------------------------------------------
+# k6 CSV parser  (--out csv=result.csv)
+# ---------------------------------------------------------------------------
+
+def parse_k6_csv(file_path: str) -> list[dict]:
+    """Parse a k6 raw metrics CSV file (``k6 run --out csv=result.csv``).
+
+    k6 CSV columns:
+        metric_name, timestamp, metric_value, [tags...]
+
+    Only rows where metric_name == "http_req_duration" are used.
+    The ``url`` tag (if present) is used as the endpoint key; otherwise
+    ``name`` tag is tried, then the raw metric_name.
+
+    Groups by endpoint key, computes p50/p99 from metric_value (already in ms),
+    rps = count / wall_duration_seconds.
+    sample_time = ISO string from max timestamp.
+
+    source = "k6_csv"
+    """
+    elapsed_map: dict[str, list[float]] = {}
+    ts_min: dict[str, int] = {}
+    ts_max: dict[str, int] = {}
+
+    with open(file_path, encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            if row.get("metric_name") != "http_req_duration":
+                continue
+            try:
+                value = float(row["metric_value"])
+                # timestamp column is Unix seconds (float) in k6 CSV
+                ts_s = float(row["timestamp"])
+                ts_ms = int(ts_s * 1000)
+            except (KeyError, ValueError):
+                continue
+
+            # Resolve endpoint key from tags: prefer 'url', fallback 'name'
+            url = row.get("url") or row.get("name") or "http_req_duration"
+            url = url.strip()
+
+            elapsed_map.setdefault(url, []).append(value)
+            if url not in ts_min or ts_ms < ts_min[url]:
+                ts_min[url] = ts_ms
+            if url not in ts_max or ts_ms > ts_max[url]:
+                ts_max[url] = ts_ms
+
+    if not elapsed_map:
+        raise ValueError(
+            "No 'http_req_duration' rows found in k6 CSV. "
+            "Ensure the file was generated with '--out csv=result.csv'."
+        )
+
+    samples: list[dict] = []
+    for url, elapseds in elapsed_map.items():
+        count = len(elapseds)
+        duration_s = (ts_max[url] - ts_min[url]) / 1000.0
+        rps = count / duration_s if duration_s > 0 else 0.0
+        samples.append({
+            "endpoint_fqn": url,
+            "p50_ms": _percentile(elapseds, 50),
+            "p99_ms": _percentile(elapseds, 99),
+            "rps": rps,
+            "sample_time": _iso_from_ms(ts_max[url]),
+            "source": "k6_csv",
+        })
+    return samples
+
+
+# ---------------------------------------------------------------------------
 # Auto-detect dispatcher
 # ---------------------------------------------------------------------------
 
 def parse_perf_file(file_path: str) -> list[dict]:
-    """Auto-detect format by file extension and parse accordingly.
+    """Auto-detect format by file extension and content, then parse.
 
     ``.log``  → Gatling simulation.log
     ``.xml``  → JMeter JTL XML
-    ``.json`` → Simple JSON array
+    ``.csv``  → k6 CSV (--out csv=result.csv)
+    ``.json`` → k6 summary export if top-level key "metrics" present,
+                otherwise simple JSON array
 
     Raises ValueError for unrecognised extensions.
     """
@@ -229,10 +395,17 @@ def parse_perf_file(file_path: str) -> list[dict]:
         return parse_gatling(file_path)
     elif ext == ".xml":
         return parse_jmeter(file_path)
+    elif ext == ".csv":
+        return parse_k6_csv(file_path)
     elif ext == ".json":
+        # Peek at the file to distinguish k6 summary from simple JSON array
+        with open(file_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict) and "metrics" in data:
+            return parse_k6_summary(file_path)
         return parse_json(file_path)
     else:
         raise ValueError(
             f"Unrecognised perf file extension {ext!r}. "
-            "Expected .log (Gatling), .xml (JMeter), or .json."
+            "Expected .log (Gatling), .xml (JMeter), .csv (k6), or .json."
         )

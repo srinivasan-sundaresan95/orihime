@@ -17,6 +17,8 @@ from orihime.perf_ingest import (
     parse_gatling,
     parse_jmeter,
     parse_json,
+    parse_k6_summary,
+    parse_k6_csv,
     parse_perf_file,
     _percentile,
 )
@@ -126,6 +128,138 @@ def test_parse_json_basic():
 
 
 # ---------------------------------------------------------------------------
+# Test 3b: parse_k6_summary on an inline k6 summary export JSON
+# ---------------------------------------------------------------------------
+
+_K6_SUMMARY_JSON = {
+    "metrics": {
+        "http_req_duration": {
+            "type": "trend",
+            "contains": "time",
+            "values": {"p(50)": 95.0, "p(99)": 420.0, "avg": 110.0, "min": 40.0, "max": 650.0},
+        },
+        "http_reqs": {
+            "type": "counter",
+            "contains": "default",
+            "values": {"count": 1200, "rate": 60.0},
+        },
+        "http_req_duration{url:GET /api/items}": {
+            "type": "trend",
+            "contains": "time",
+            "values": {"p(50)": 80.0, "p(99)": 310.0, "avg": 90.0, "min": 30.0, "max": 500.0},
+        },
+        "http_reqs{url:GET /api/items}": {
+            "type": "counter",
+            "contains": "default",
+            "values": {"count": 800, "rate": 40.0},
+        },
+        "http_req_duration{url:POST /api/orders}": {
+            "type": "trend",
+            "contains": "time",
+            "values": {"p(50)": 150.0, "p(99)": 600.0, "avg": 180.0, "min": 80.0, "max": 900.0},
+        },
+        "http_reqs{url:POST /api/orders}": {
+            "type": "counter",
+            "contains": "default",
+            "values": {"count": 400, "rate": 20.0},
+        },
+    },
+    "state": {"testRunDurationMs": 1700000020000},
+}
+
+
+def test_parse_k6_summary_basic():
+    path = _write_tmp(".json", json.dumps(_K6_SUMMARY_JSON))
+    try:
+        samples = parse_k6_summary(path)
+        assert isinstance(samples, list)
+        assert len(samples) == 3  # untagged + 2 url-tagged
+        urls = {s["endpoint_fqn"] for s in samples}
+        assert "GET /api/items" in urls
+        assert "POST /api/orders" in urls
+        for s in samples:
+            assert s["source"] == "k6_summary"
+            assert s["p50_ms"] >= 0
+            assert s["p99_ms"] >= s["p50_ms"]
+            assert s["sample_time"]
+        # Spot-check specific values
+        items = next(s for s in samples if s["endpoint_fqn"] == "GET /api/items")
+        assert items["p50_ms"] == 80.0
+        assert items["p99_ms"] == 310.0
+        assert items["rps"] == 40.0
+    finally:
+        os.unlink(path)
+
+
+def test_parse_k6_summary_no_metrics_raises():
+    path = _write_tmp(".json", json.dumps({"foo": "bar"}))
+    try:
+        with pytest.raises(ValueError, match="metrics"):
+            parse_k6_summary(path)
+    finally:
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Test 3c: parse_k6_csv on an inline k6 CSV
+# ---------------------------------------------------------------------------
+
+# k6 CSV format: metric_name,timestamp,metric_value,[tag columns]
+_K6_CSV = """\
+metric_name,timestamp,metric_value,url,name
+http_req_duration,1700000000.100,80.0,GET /api/items,GET /api/items
+http_req_duration,1700000000.200,120.0,GET /api/items,GET /api/items
+http_req_duration,1700000000.300,95.0,GET /api/items,GET /api/items
+http_req_duration,1700000000.100,200.0,POST /api/orders,POST /api/orders
+http_req_duration,1700000000.500,350.0,POST /api/orders,POST /api/orders
+http_req_blocked,1700000000.100,1.0,GET /api/items,GET /api/items
+"""
+
+
+def test_parse_k6_csv_basic():
+    path = _write_tmp(".csv", _K6_CSV)
+    try:
+        samples = parse_k6_csv(path)
+        assert isinstance(samples, list)
+        assert len(samples) == 2
+        urls = {s["endpoint_fqn"] for s in samples}
+        assert "GET /api/items" in urls
+        assert "POST /api/orders" in urls
+        for s in samples:
+            assert s["source"] == "k6_csv"
+            assert s["p50_ms"] >= 0
+            assert s["p99_ms"] >= s["p50_ms"]
+            assert s["rps"] > 0
+            assert s["sample_time"]
+        # http_req_blocked rows must be excluded
+        assert all(s["endpoint_fqn"] in {"GET /api/items", "POST /api/orders"} for s in samples)
+    finally:
+        os.unlink(path)
+
+
+def test_parse_k6_csv_percentile_values():
+    # GET /api/items elapseds: [80, 95, 120] sorted → p50=95, p99=120
+    path = _write_tmp(".csv", _K6_CSV)
+    try:
+        samples = parse_k6_csv(path)
+        items = next(s for s in samples if s["endpoint_fqn"] == "GET /api/items")
+        assert items["p50_ms"] == 95.0
+        assert items["p99_ms"] == 120.0
+    finally:
+        os.unlink(path)
+
+
+def test_parse_k6_csv_no_duration_rows_raises():
+    csv_content = "metric_name,timestamp,metric_value,url\nhttp_req_blocked,1700000000.1,1.0,/foo\n"
+    path = _write_tmp(".csv", csv_content)
+    try:
+        with pytest.raises(ValueError, match="http_req_duration"):
+            parse_k6_csv(path)
+    finally:
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
 # Test 4: parse_perf_file auto-detects format by extension
 # ---------------------------------------------------------------------------
 
@@ -146,13 +280,29 @@ def test_parse_perf_file_autodetect():
     finally:
         os.unlink(path_xml)
 
-    # .json → JSON
+    # .json with "metrics" key → k6 summary
+    path_k6 = _write_tmp(".json", json.dumps(_K6_SUMMARY_JSON))
+    try:
+        samples = parse_perf_file(path_k6)
+        assert all(s["source"] == "k6_summary" for s in samples)
+    finally:
+        os.unlink(path_k6)
+
+    # .json array → simple JSON
     path_json = _write_tmp(".json", json.dumps(_JSON_DATA))
     try:
         samples = parse_perf_file(path_json)
         assert all(s["source"] == "json" for s in samples)
     finally:
         os.unlink(path_json)
+
+    # .csv → k6 CSV
+    path_csv = _write_tmp(".csv", _K6_CSV)
+    try:
+        samples = parse_perf_file(path_csv)
+        assert all(s["source"] == "k6_csv" for s in samples)
+    finally:
+        os.unlink(path_csv)
 
     # Unknown extension raises ValueError
     path_txt = _write_tmp(".txt", "data")

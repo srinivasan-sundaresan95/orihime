@@ -151,12 +151,18 @@ def find_callers(method_fqn: str, exclude_generated: bool = False) -> list[dict]
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def find_callees(method_fqn: str, exclude_generated: bool = False) -> list[dict]:
+def find_callees(
+    method_fqn: str,
+    exclude_generated: bool = False,
+    include_synthetic: bool = False,
+) -> list[dict]:
     """Find all methods directly called by the given method.
 
     Args:
         method_fqn: Fully-qualified method name, e.g. ``com.example.Foo.bar``.
         exclude_generated: When True, filter out Lombok/compiler-generated callees.
+        include_synthetic: When False (default), framework-injected CALLS edges
+            (filters, AOP advice) are excluded.  Set to True to include them.
 
     Returns:
         List of dicts with keys ``fqn``, ``file_path``, ``line_start``.
@@ -167,9 +173,10 @@ def find_callees(method_fqn: str, exclude_generated: bool = False) -> list[dict]
         return []
     try:
         gen_filter = " AND callee.generated = false" if exclude_generated else ""
+        synth_filter = " AND c.caller_arg_pos <> -99" if not include_synthetic else ""
         result = conn.execute(
-            "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
-            f"WHERE caller.fqn = $fqn{gen_filter} "
+            "MATCH (caller:Method)-[c:CALLS]->(callee:Method) "
+            f"WHERE caller.fqn = $fqn{gen_filter}{synth_filter} "
             "MATCH (f:File) WHERE f.id = callee.file_id "
             "RETURN callee.fqn AS fqn, f.path AS file_path, callee.line_start AS line_start",
             {"fqn": method_fqn},
@@ -285,7 +292,12 @@ def find_repo_dependencies(repo_name: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def blast_radius(method_fqn: str, max_depth: int = 3, exclude_generated: bool = False) -> list[dict]:
+def blast_radius(
+    method_fqn: str,
+    max_depth: int = 3,
+    exclude_generated: bool = False,
+    include_synthetic: bool = False,
+) -> list[dict]:
     """Find all methods transitively affected by changing the given method.
 
     Performs a breadth-first traversal of CALLS edges in reverse
@@ -295,6 +307,8 @@ def blast_radius(method_fqn: str, max_depth: int = 3, exclude_generated: bool = 
         method_fqn: FQN of the method being changed, e.g. ``com.example.Foo.bar``.
         max_depth:  Maximum number of hops to traverse (default 3, max 10).
         exclude_generated: When True, filter out Lombok/compiler-generated callers.
+        include_synthetic: When False (default), framework-injected CALLS edges
+            (filters, AOP advice) are excluded from the traversal.
 
     Returns:
         List of dicts with keys ``fqn``, ``file_path``, and ``depth``.
@@ -314,6 +328,7 @@ def blast_radius(method_fqn: str, max_depth: int = 3, exclude_generated: bool = 
         queue.append((method_fqn, 0))
 
         gen_filter = " AND caller.generated = false" if exclude_generated else ""
+        synth_filter = " AND c.caller_arg_pos <> -99" if not include_synthetic else ""
 
         while queue:
             current_fqn, depth = queue.popleft()
@@ -321,8 +336,8 @@ def blast_radius(method_fqn: str, max_depth: int = 3, exclude_generated: bool = 
                 continue
 
             cypher = (
-                "MATCH (caller:Method)-[:CALLS]->(callee:Method) "
-                f"WHERE callee.fqn = $fqn{gen_filter} "
+                "MATCH (caller:Method)-[c:CALLS]->(callee:Method) "
+                f"WHERE callee.fqn = $fqn{gen_filter}{synth_filter} "
                 "MATCH (f:File) WHERE f.id = caller.file_id "
                 "RETURN caller.fqn AS fqn, f.path AS file_path"
             )
@@ -350,26 +365,40 @@ def blast_radius(method_fqn: str, max_depth: int = 3, exclude_generated: bool = 
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def search_symbol(query: str) -> list[dict]:
+def search_symbol(query: str) -> dict:
     """Search for classes or methods by name (case-insensitive substring match).
 
     Args:
         query: Substring to search for, e.g. ``InterestCalc`` or ``calculate``.
 
     Returns:
-        List of dicts with keys ``type`` (``"class"`` or ``"method"``),
-        ``fqn``, and ``file_path``.
-        Results from both classes and methods are merged and returned together.
+        Dict with keys:
+          ``results``             – list of dicts with ``type``, ``fqn``, ``file_path``;
+                                    at most 50 Class rows and 50 Method rows.
+          ``total_count``         – total matches across both Class and Method (before limit).
+          ``total_class_count``   – total Class matches before the 50-row cap.
+          ``total_method_count``  – total Method matches before the 50-row cap.
+          ``is_truncated``        – True when total_count exceeds the number of results returned.
     """
     conn = _get_connection()
     if conn is None:
-        return []
+        return {"results": [], "total_count": 0, "total_class_count": 0, "total_method_count": 0, "is_truncated": False}
 
     # KuzuDB does not have a built-in ILIKE; use LOWER() for case-insensitive match.
     lower_query = query.lower()
     try:
         results: list[dict] = []
 
+        # Count classes
+        class_count_result = conn.execute(
+            "MATCH (c:Class) WHERE lower(c.name) CONTAINS $q RETURN count(*) AS n",
+            {"q": lower_query},
+        )
+        total_class_count: int = 0
+        if class_count_result.has_next():
+            total_class_count = class_count_result.get_next()[0]
+
+        # Fetch up to 50 class rows
         class_result = conn.execute(
             "MATCH (c:Class) "
             "WHERE lower(c.name) CONTAINS $q "
@@ -381,6 +410,16 @@ def search_symbol(query: str) -> list[dict]:
         for row in _rows(class_result, ["fqn", "file_path"]):
             results.append({"type": "class", **row})
 
+        # Count methods
+        method_count_result = conn.execute(
+            "MATCH (m:Method) WHERE lower(m.name) CONTAINS $q RETURN count(*) AS n",
+            {"q": lower_query},
+        )
+        total_method_count: int = 0
+        if method_count_result.has_next():
+            total_method_count = method_count_result.get_next()[0]
+
+        # Fetch up to 50 method rows
         method_result = conn.execute(
             "MATCH (m:Method) "
             "WHERE lower(m.name) CONTAINS $q "
@@ -392,10 +431,18 @@ def search_symbol(query: str) -> list[dict]:
         for row in _rows(method_result, ["fqn", "file_path"]):
             results.append({"type": "method", **row})
 
-        return results
+        total_count = total_class_count + total_method_count
+        return {
+            "results": results,
+            "total_count": total_count,
+            "total_class_count": total_class_count,
+            "total_method_count": total_method_count,
+            "is_truncated": total_count > len(results),
+        }
     except Exception as exc:
         log.error("search_symbol(%r): %s", query, exc)
-        return [{"error": str(exc)}]
+        return {"error": str(exc), "results": [], "total_count": 0,
+                "total_class_count": 0, "total_method_count": 0, "is_truncated": False}
 
 
 # ---------------------------------------------------------------------------
@@ -2016,14 +2063,18 @@ def find_io_fanout(repo_name: str, min_total: int = 2) -> list[dict]:
 
 @mcp.tool()
 def ingest_perf_results(repo_name: str, file_path: str) -> dict:
-    """Ingest a Gatling/JMeter/JSON perf results file into the graph.
+    """Ingest a Gatling/JMeter/k6/JSON perf results file into the graph.
 
     Creates PerfSample nodes and OBSERVED_AT edges to matching Method nodes.
 
     Args:
         repo_name: The logical name of the indexed repository.
-        file_path: Absolute path to the perf results file
-                   (.log = Gatling, .xml = JMeter, .json = simple JSON).
+        file_path: Absolute path to the perf results file.
+                   .log  = Gatling simulation.log
+                   .xml  = JMeter JTL XML
+                   .csv  = k6 CSV  (k6 run --out csv=result.csv)
+                   .json = k6 summary export (k6 run --summary-export result.json)
+                           OR simple JSON array ({fqn, p50_ms, p99_ms, rps}[])
 
     Returns:
         Dict with keys ``ingested``, ``matched_methods``, ``unmatched``.
